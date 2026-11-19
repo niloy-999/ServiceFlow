@@ -48,8 +48,8 @@ async function createFixtures() {
       [tenantB, "RLS Integration Tenant B", `rls-${tenantB}`],
     ]) {
       await migrator.query(
-        `INSERT INTO businesses (id, name, slug, updated_at)
-         VALUES ($1, $2, $3, $4)`,
+        `INSERT INTO businesses (id, name, slug, status, updated_at)
+         VALUES ($1, $2, $3, 'ACTIVE', $4)`,
         [id, name, slug, now],
       );
     }
@@ -219,6 +219,96 @@ after(async () => {
   }
 });
 
+test("Tenant access requires an active user, membership, and business", async () => {
+  const discovery = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`
+      SELECT set_config('app.user_id', ${userA}, true)
+    `;
+
+    const beforeTenant = await tx.$queryRaw`
+      SELECT id, tenant_id
+      FROM tenant_memberships
+      ORDER BY id
+    `;
+
+    await tx.$queryRaw`
+      SELECT set_config('app.tenant_id', ${tenantA}, true)
+    `;
+
+    const afterTenant = await tx.$queryRaw`
+      SELECT id, tenant_id
+      FROM tenant_memberships
+      ORDER BY id
+    `;
+
+    return { beforeTenant, afterTenant };
+  });
+
+  assert.deepEqual(
+    discovery.beforeTenant.map((row) => row.id),
+    [membershipA],
+    "User must discover their own membership before tenant selection",
+  );
+
+  assert.deepEqual(
+    discovery.afterTenant.map((row) => row.id),
+    [membershipA],
+    "Tenant context must restrict membership visibility",
+  );
+
+  async function assertDenied(userId, tenantId, message) {
+    let callbackInvoked = false;
+
+    await assert.rejects(
+      tenantContext.withAuthorizedTenantContext(userId, tenantId, async () => {
+        callbackInvoked = true;
+      }),
+      (error) => error?.getStatus?.() === 403,
+      message,
+    );
+
+    assert.equal(callbackInvoked, false, `${message}: callback must not execute`);
+  }
+
+  await assertDenied(userA, tenantB, "A user cannot access another user's business");
+
+  try {
+    await migrator.query("UPDATE tenant_memberships SET status = 'INVITED' WHERE id = $1", [
+      membershipA,
+    ]);
+    await assertDenied(userA, tenantA, "Invited membership must be denied");
+  } finally {
+    await migrator.query("UPDATE tenant_memberships SET status = 'ACTIVE' WHERE id = $1", [
+      membershipA,
+    ]);
+  }
+
+  try {
+    await migrator.query("UPDATE tenant_memberships SET left_at = NOW() WHERE id = $1", [
+      membershipA,
+    ]);
+    await assertDenied(userA, tenantA, "Departed membership must be denied");
+  } finally {
+    await migrator.query("UPDATE tenant_memberships SET left_at = NULL WHERE id = $1", [
+      membershipA,
+    ]);
+  }
+
+  try {
+    await migrator.query("UPDATE users SET status = 'SUSPENDED' WHERE id = $1", [userA]);
+    await assertDenied(userA, tenantA, "Inactive user must be denied");
+  } finally {
+    await migrator.query("UPDATE users SET status = 'ACTIVE' WHERE id = $1", [userA]);
+  }
+
+  try {
+    await migrator.query("UPDATE businesses SET status = 'SUSPENDED' WHERE id = $1", [tenantA]);
+    await assertDenied(userA, tenantA, "Suspended business must be denied");
+  } finally {
+    await migrator.query("UPDATE businesses SET status = 'ACTIVE' WHERE id = $1", [tenantA]);
+  }
+});
+
 test("PostgreSQL enforces tenant isolation across concurrent transactions", async () => {
   const noContextCounts = await prisma.$transaction(async (tx) => {
     const counts = {};
@@ -240,22 +330,26 @@ test("PostgreSQL enforces tenant isolation across concurrent transactions", asyn
     [tenantA, tenantB],
     [tenantB, tenantA],
   ]) {
-    await tenantContext.withTenantContext(tenantId, async (tx) => {
-      for (const table of tables) {
-        const own = await tx.$queryRawUnsafe(
-          `SELECT count(*)::int AS total FROM "${table}" WHERE tenant_id = $1::uuid`,
-          tenantId,
-        );
+    await tenantContext.withAuthorizedTenantContext(
+      tenantId === tenantA ? userA : userB,
+      tenantId,
+      async (tx) => {
+        for (const table of tables) {
+          const own = await tx.$queryRawUnsafe(
+            `SELECT count(*)::int AS total FROM "${table}" WHERE tenant_id = $1::uuid`,
+            tenantId,
+          );
 
-        const foreign = await tx.$queryRawUnsafe(
-          `SELECT count(*)::int AS total FROM "${table}" WHERE tenant_id = $1::uuid`,
-          otherTenantId,
-        );
+          const foreign = await tx.$queryRawUnsafe(
+            `SELECT count(*)::int AS total FROM "${table}" WHERE tenant_id = $1::uuid`,
+            otherTenantId,
+          );
 
-        assert.equal(own[0].total, 1, `${table}: own tenant row must be visible`);
-        assert.equal(foreign[0].total, 0, `${table}: foreign tenant row must be hidden`);
-      }
-    });
+          assert.equal(own[0].total, 1, `${table}: own tenant row must be visible`);
+          assert.equal(foreign[0].total, 0, `${table}: foreign tenant row must be hidden`);
+        }
+      },
+    );
   }
 
   await migrator.query(
@@ -269,7 +363,7 @@ test("PostgreSQL enforces tenant isolation across concurrent transactions", asyn
     error.message.includes("Code: `42501`") &&
     error.message.includes("row-level security policy");
 
-  await tenantContext.withTenantContext(tenantA, async (tx) => {
+  await tenantContext.withAuthorizedTenantContext(userA, tenantA, async (tx) => {
     const updateForeign = await tx.$executeRaw`
       UPDATE branches SET name = 'UNAUTHORIZED'
       WHERE id = ${branchB}::uuid
@@ -284,7 +378,8 @@ test("PostgreSQL enforces tenant isolation across concurrent transactions", asyn
   });
 
   await assert.rejects(
-    tenantContext.withTenantContext(
+    tenantContext.withAuthorizedTenantContext(
+      userA,
       tenantA,
       (tx) => tx.$executeRaw`
       INSERT INTO branches (id, tenant_id, code, name, updated_at)
@@ -301,7 +396,8 @@ test("PostgreSQL enforces tenant isolation across concurrent transactions", asyn
   );
 
   await assert.rejects(
-    tenantContext.withTenantContext(
+    tenantContext.withAuthorizedTenantContext(
+      userA,
       tenantA,
       (tx) => tx.$executeRaw`
       UPDATE branches
@@ -312,7 +408,7 @@ test("PostgreSQL enforces tenant isolation across concurrent transactions", asyn
     rlsViolation,
   );
 
-  await tenantContext.withTenantContext(tenantA, async (tx) => {
+  await tenantContext.withAuthorizedTenantContext(userA, tenantA, async (tx) => {
     const ownUpdate = await tx.$executeRaw`
       UPDATE branches
       SET name = 'RLS Integration Branch A Updated'
@@ -322,7 +418,7 @@ test("PostgreSQL enforces tenant isolation across concurrent transactions", asyn
     assert.equal(ownUpdate, 1, "Same-tenant update must succeed");
   });
 
-  await tenantContext.withTenantContext(tenantA, async (tx) => {
+  await tenantContext.withAuthorizedTenantContext(userA, tenantA, async (tx) => {
     const ownDelete = await tx.$executeRaw`
       DELETE FROM branches WHERE id = ${disposableBranchA}::uuid
     `;
@@ -331,7 +427,7 @@ test("PostgreSQL enforces tenant isolation across concurrent transactions", asyn
   });
 
   const concurrentResults = await Promise.all([
-    tenantContext.withTenantContext(tenantA, async (tx) => {
+    tenantContext.withAuthorizedTenantContext(userA, tenantA, async (tx) => {
       for (let i = 0; i < 20; i += 1) {
         const rows = await tx.$queryRaw`
           SELECT current_setting('app.tenant_id', true) AS tenant_id,
@@ -348,7 +444,7 @@ test("PostgreSQL enforces tenant isolation across concurrent transactions", asyn
 
       return 20;
     }),
-    tenantContext.withTenantContext(tenantB, async (tx) => {
+    tenantContext.withAuthorizedTenantContext(userB, tenantB, async (tx) => {
       for (let i = 0; i < 20; i += 1) {
         const rows = await tx.$queryRaw`
           SELECT current_setting('app.tenant_id', true) AS tenant_id,
@@ -370,11 +466,12 @@ test("PostgreSQL enforces tenant isolation across concurrent transactions", asyn
   assert.deepEqual(concurrentResults, [20, 20]);
 
   const outsideContext = await prisma.$queryRaw`
-    SELECT current_setting('app.tenant_id', true) AS tenant_id
+    SELECT
+      current_setting('app.user_id', true) AS user_id,
+      current_setting('app.tenant_id', true) AS tenant_id
   `;
 
-  assert.ok(
-    outsideContext[0].tenant_id == null || outsideContext[0].tenant_id === "",
-    "Tenant context must not persist outside its transaction",
-  );
+  for (const [key, value] of Object.entries(outsideContext[0])) {
+    assert.ok(value == null || value === "", `${key} must not persist outside its transaction`);
+  }
 });
