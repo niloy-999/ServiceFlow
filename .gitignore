@@ -23,8 +23,13 @@ coverage/
 *.tmp
 
 # Local databases and generated artifacts
+.local/
 *.sqlite
 *.db
 
 # TypeScript incremental build metadata
 *.tsbuildinfo
+
+# Generated Prisma Client
+apps/api/generated/prisma/
+apps/api/src/generated/prisma/

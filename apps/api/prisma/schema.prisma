@@ -1,0 +1,148 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum BusinessStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  REJECTED
+  CLOSED
+}
+
+model User {
+  id              String   @id @default(uuid()) @db.Uuid
+  emailNormalized String   @unique @map("email_normalized") @db.VarChar(320)
+  passwordHash    String   @map("password_hash") @db.VarChar(255)
+  displayName     String?  @map("display_name") @db.VarChar(160)
+  status          String   @default("ACTIVE") @db.VarChar(32)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version         BigInt   @default(1)
+
+  memberships TenantMembership[]
+
+  @@map("users")
+}
+
+model Business {
+  id              String         @id @default(uuid()) @db.Uuid
+  name            String         @db.VarChar(160)
+  slug            String         @unique @db.VarChar(100)
+  status          BusinessStatus @default(PENDING)
+  defaultCurrency String         @default("BDT") @map("default_currency") @db.Char(3)
+  defaultTimezone String         @default("Asia/Dhaka") @map("default_timezone") @db.VarChar(64)
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version         BigInt         @default(1)
+
+  memberships TenantMembership[]
+  branches    Branch[]
+  roles       Role[]
+
+  @@map("businesses")
+}
+
+model TenantMembership {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String    @map("tenant_id") @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  status    String    @default("INVITED") @db.VarChar(32)
+  joinedAt  DateTime? @map("joined_at") @db.Timestamptz(3)
+  leftAt    DateTime? @map("left_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   BigInt    @default(1)
+
+  business Business @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  roleAssignments MembershipRole[]
+
+  @@unique([tenantId, userId])
+  @@unique([tenantId, id])
+  @@index([userId, status])
+  @@map("tenant_memberships")
+}
+
+model Branch {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  code      String   @db.VarChar(32)
+  name      String   @db.VarChar(160)
+  status    String   @default("ACTIVE") @db.VarChar(32)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version   BigInt   @default(1)
+
+  business Business @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, code])
+  @@unique([tenantId, id])
+  @@map("branches")
+}
+
+model Role {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  name         String   @db.VarChar(100)
+  isSystem     Boolean  @default(false) @map("is_system")
+  status       String   @default("ACTIVE") @db.VarChar(32)
+  templateCode String?  @map("template_code") @db.VarChar(64)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version      BigInt   @default(1)
+
+  business        Business         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  permissions     RolePermission[]
+  membershipRoles MembershipRole[]
+
+  @@unique([tenantId, name])
+  @@unique([tenantId, id])
+  @@map("roles")
+}
+
+model Permission {
+  code        String @id @db.VarChar(100)
+  description String @db.VarChar(255)
+  riskClass   String @map("risk_class") @db.VarChar(32)
+
+  roleAssignments RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  tenantId       String   @map("tenant_id") @db.Uuid
+  roleId         String   @map("role_id") @db.Uuid
+  permissionCode String   @map("permission_code") @db.VarChar(100)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  role Role @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Restrict)
+
+  permission Permission @relation(fields: [permissionCode], references: [code], onDelete: Restrict)
+
+  @@id([tenantId, roleId, permissionCode])
+  @@index([permissionCode])
+  @@map("role_permissions")
+}
+
+model MembershipRole {
+  tenantId     String   @map("tenant_id") @db.Uuid
+  membershipId String   @map("membership_id") @db.Uuid
+  roleId       String   @map("role_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  membership TenantMembership @relation(fields: [tenantId, membershipId], references: [tenantId, id], onDelete: Restrict)
+
+  role Role @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Restrict)
+
+  @@id([tenantId, membershipId, roleId])
+  @@index([tenantId, roleId])
+  @@map("membership_roles")
+}
