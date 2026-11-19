@@ -7,3 +7,15 @@ settings:
 importers:
 
   .: {}
+
+  apps/api: {}
+
+  apps/web: {}
+
+  apps/worker: {}
+
+  packages/config: {}
+
+  packages/contracts: {}
+
+  packages/tooling: {}
