@@ -2,7 +2,20 @@
   "name": "@serviceflow/api",
   "version": "0.1.0",
   "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@nestjs/common": "12.5.1",
+    "@nestjs/core": "12.5.1",
+    "@nestjs/platform-express": "12.5.1",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2"
+  },
   "devDependencies": {
-    "@serviceflow/config": "workspace:*"
+    "@serviceflow/config": "workspace:*",
+    "@types/node": "24.10.0"
   }
 }
