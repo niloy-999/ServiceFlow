@@ -8,7 +8,8 @@
     "typecheck": "prisma generate && tsc --noEmit -p tsconfig.json",
     "db:generate": "prisma generate",
     "test:tenant-isolation": "node --test test/tenant-isolation.integration.mjs",
-    "test:password": "node --test test/password.service.test.mjs"
+    "test:password": "node --test test/password.service.test.mjs",
+    "test:auth-session": "node --test test/auth-session.integration.mjs"
   },
   "dependencies": {
     "@nestjs/common": "12.5.1",
