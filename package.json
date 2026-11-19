@@ -1,0 +1,12 @@
+{
+  "name": "serviceflow",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.34.9",
+  "engines": {
+    "node": ">=24.10.0 <25"
+  },
+  "scripts": {
+    "check:runtime": "node scripts/check-runtime.mjs"
+  }
+}
