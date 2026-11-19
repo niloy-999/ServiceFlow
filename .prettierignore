@@ -1,0 +1,20 @@
+# Dependencies and package-manager data
+node_modules/
+.pnpm-store/
+.cache/
+
+# Generated application output
+.next/
+dist/
+build/
+coverage/
+.turbo/
+
+# TypeScript incremental metadata
+*.tsbuildinfo
+
+# Lockfiles and generated artifacts
+pnpm-lock.yaml
+
+# Frozen Phase 0 baseline: preserve the approved source document
+docs/architecture/SERVICEFLOW_PHASE_0_SPECIFICATION.md

@@ -7,9 +7,12 @@
     "node": ">=24.10.0 <25"
   },
   "scripts": {
-    "check:runtime": "node scripts/check-runtime.mjs"
+    "check:runtime": "node scripts/check-runtime.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "devDependencies": {
+    "prettier": "3.10.1",
     "typescript": "5.9.3"
   }
 }
