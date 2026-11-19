@@ -1,5 +1,10 @@
 {
   "name": "@serviceflow/config",
   "version": "0.1.0",
-  "private": true
+  "private": true,
+  "exports": {
+    "./typescript/base.json": "./typescript/base.json",
+    "./typescript/node.json": "./typescript/node.json",
+    "./typescript/next.json": "./typescript/next.json"
+  }
 }

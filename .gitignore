@@ -25,3 +25,6 @@ coverage/
 # Local databases and generated artifacts
 *.sqlite
 *.db
+
+# TypeScript incremental build metadata
+*.tsbuildinfo
