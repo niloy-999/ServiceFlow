@@ -464,3 +464,113 @@ test("Current-user endpoint requires an active session and returns only safe pro
 
   assert.equal(revokedSessionResponse.status, 401);
 });
+
+test("Membership discovery returns only the authenticated user's active memberships", async () => {
+  const tenantIds = Array.from({ length: 6 }, () => randomUUID());
+  const membershipIds = Array.from({ length: 6 }, () => randomUUID());
+  const now = new Date();
+  const emptyUserEmail = `${randomUUID()}@example.invalid`;
+  let emptyUserId;
+
+  const loginUser = await migrator.query("SELECT id FROM users WHERE email_normalized = $1", [
+    users.login,
+  ]);
+  const otherUser = await migrator.query("SELECT id FROM users WHERE email_normalized = $1", [
+    users.logoutAll,
+  ]);
+
+  const userId = loginUser.rows[0].id;
+  const otherUserId = otherUser.rows[0].id;
+
+  try {
+    for (let index = 0; index < tenantIds.length; index += 1) {
+      await migrator.query(
+        `INSERT INTO businesses (
+           id, name, slug, status, default_currency, default_timezone, updated_at
+         )
+         VALUES ($1, $2, $3, $4, 'BDT', 'Asia/Dhaka', $5)`,
+        [
+          tenantIds[index],
+          `Membership Discovery Business ${index}`,
+          `membership-${tenantIds[index]}`,
+          index === 4 ? "SUSPENDED" : "ACTIVE",
+          now,
+        ],
+      );
+    }
+
+    const membershipFixtures = [
+      [membershipIds[0], tenantIds[0], userId, "ACTIVE", now, null],
+      [membershipIds[1], tenantIds[1], userId, "ACTIVE", now, null],
+      [membershipIds[2], tenantIds[2], userId, "INVITED", null, null],
+      [membershipIds[3], tenantIds[3], userId, "ACTIVE", now, now],
+      [membershipIds[4], tenantIds[4], userId, "ACTIVE", now, null],
+      [membershipIds[5], tenantIds[5], otherUserId, "ACTIVE", now, null],
+    ];
+
+    for (const [id, tenantId, memberId, status, joinedAt, leftAt] of membershipFixtures) {
+      await migrator.query(
+        `INSERT INTO tenant_memberships (
+           id, tenant_id, user_id, status, joined_at, left_at, updated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [id, tenantId, memberId, status, joinedAt, leftAt, now],
+      );
+    }
+
+    const unauthenticated = await fetch(`${apiBaseUrl}/api/v1/auth/memberships`);
+    assert.equal(unauthenticated.status, 401);
+
+    const loginResponse = await login(users.login);
+    assert.equal(loginResponse.status, 200);
+
+    const token = getCookie(loginResponse);
+    const response = await fetch(`${apiBaseUrl}/api/v1/auth/memberships`, {
+      headers: { Cookie: cookieHeader(token) },
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+
+    const body = await response.json();
+
+    assert.deepEqual(
+      body.memberships.map((membership) => membership.membershipId),
+      [membershipIds[0], membershipIds[1]],
+    );
+
+    assert.deepEqual(
+      body.memberships.map((membership) => membership.business.id),
+      [tenantIds[0], tenantIds[1]],
+    );
+    assert.deepEqual(
+      body.memberships.map((membership) => membership.business.name),
+      ["Membership Discovery Business 0", "Membership Discovery Business 1"],
+    );
+    for (const membership of body.memberships) {
+      assert.equal(membership.membershipStatus, "ACTIVE");
+      assert.equal(membership.business.currency, "BDT");
+      assert.equal(membership.business.timezone, "Asia/Dhaka");
+    }
+
+    emptyUserId = await createUser(emptyUserEmail);
+    const emptyUserLogin = await login(emptyUserEmail);
+    assert.equal(emptyUserLogin.status, 200);
+
+    const emptyUserToken = getCookie(emptyUserLogin);
+    const emptyResponse = await fetch(`${apiBaseUrl}/api/v1/auth/memberships`, {
+      headers: { Cookie: cookieHeader(emptyUserToken) },
+    });
+
+    assert.equal(emptyResponse.status, 200);
+    assert.deepEqual(await emptyResponse.json(), { memberships: [] });
+  } finally {
+    await migrator.query("DELETE FROM tenant_memberships WHERE tenant_id = ANY($1::uuid[])", [
+      tenantIds,
+    ]);
+    await migrator.query("DELETE FROM businesses WHERE id = ANY($1::uuid[])", [tenantIds]);
+    if (emptyUserId) {
+      await migrator.query("DELETE FROM users WHERE id = $1", [emptyUserId]);
+    }
+  }
+});

@@ -15,6 +15,7 @@ import {
 } from "@nestjs/common";
 import { RateLimitService } from "../rate-limit/rate-limit.service.js";
 import { AuthService } from "./auth.service.js";
+import { MembershipService } from "./membership.service.js";
 import { assertFrontendOrigin } from "./request-origin.js";
 import { AuthenticatedRequest, SessionAuthGuard } from "./session-auth.guard.js";
 import { clearSessionCookie, createSessionCookie, readSessionCookie } from "./session-cookie.js";
@@ -47,6 +48,7 @@ export class AuthController {
     private readonly rateLimitService: RateLimitService,
     private readonly csrfService: CsrfService,
     private readonly sessionService: SessionService,
+    private readonly membershipService: MembershipService,
   ) {}
 
   private async enforceLimit(
@@ -201,6 +203,23 @@ export class AuthController {
 
     response.setHeader("Cache-Control", "no-store");
     return this.authService.getCurrentUser(request.authSession.userId);
+  }
+
+  @Get("memberships")
+  @UseGuards(SessionAuthGuard)
+  async getMemberships(
+    @Req() request: ClientRequest,
+    @Res({ passthrough: true }) response: ResponseHeaders,
+  ) {
+    if (!request.authSession) {
+      throw new UnauthorizedException("Authentication is required.");
+    }
+
+    response.setHeader("Cache-Control", "no-store");
+
+    return {
+      memberships: await this.membershipService.listActiveMemberships(request.authSession.userId),
+    };
   }
 
   @Get("csrf")
