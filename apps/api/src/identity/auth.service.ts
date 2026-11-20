@@ -273,4 +273,27 @@ export class AuthService {
 
     return this.sessionService.createSession(user.id, userAgent);
   }
+
+  async getCurrentUser(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId, status: "ACTIVE" },
+      select: {
+        id: true,
+        emailNormalized: true,
+        displayName: true,
+        emailVerifiedAt: true,
+      },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException("Authentication is required.");
+    }
+
+    return {
+      id: user.id,
+      email: user.emailNormalized,
+      displayName: user.displayName,
+      emailVerifiedAt: user.emailVerifiedAt,
+    };
+  }
 }

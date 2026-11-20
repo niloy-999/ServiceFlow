@@ -422,3 +422,45 @@ test("Login enforces IP and email rate limits in order", async () => {
     rateLimitCalls.length = 0;
   }
 });
+
+test("Current-user endpoint requires an active session and returns only safe profile fields", async () => {
+  const unauthenticated = await fetch(`${apiBaseUrl}/api/v1/auth/me`);
+
+  assert.equal(unauthenticated.status, 401);
+
+  const loginResponse = await login(users.login);
+  const token = getCookie(loginResponse);
+
+  const response = await fetch(`${apiBaseUrl}/api/v1/auth/me`, {
+    headers: {
+      Cookie: cookieHeader(token),
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+
+  const profile = await response.json();
+
+  assert.deepEqual(Object.keys(profile).sort(), ["displayName", "email", "emailVerifiedAt", "id"]);
+
+  assert.equal(profile.email, users.login);
+  assert.equal(profile.displayName, null);
+  assert.ok(profile.id);
+  assert.equal(
+    profile.id,
+    (await migrator.query("SELECT id FROM users WHERE email_normalized = $1", [users.login]))
+      .rows[0].id,
+  );
+  assert.ok(profile.emailVerifiedAt);
+
+  assert.equal(await sessions.revokeSession(token), true);
+
+  const revokedSessionResponse = await fetch(`${apiBaseUrl}/api/v1/auth/me`, {
+    headers: {
+      Cookie: cookieHeader(token),
+    },
+  });
+
+  assert.equal(revokedSessionResponse.status, 401);
+});

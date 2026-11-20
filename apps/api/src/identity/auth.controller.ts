@@ -189,6 +189,20 @@ export class AuthController {
     };
   }
 
+  @Get("me")
+  @UseGuards(SessionAuthGuard)
+  async getCurrentUser(
+    @Req() request: ClientRequest,
+    @Res({ passthrough: true }) response: ResponseHeaders,
+  ) {
+    if (!request.authSession) {
+      throw new UnauthorizedException("Authentication is required.");
+    }
+
+    response.setHeader("Cache-Control", "no-store");
+    return this.authService.getCurrentUser(request.authSession.userId);
+  }
+
   @Get("csrf")
   @UseGuards(SessionAuthGuard)
   getCsrfToken(
