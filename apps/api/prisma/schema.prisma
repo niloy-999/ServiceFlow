@@ -20,6 +20,7 @@ model User {
   emailNormalized String   @unique @map("email_normalized") @db.VarChar(320)
   passwordHash    String   @map("password_hash") @db.VarChar(255)
   displayName     String?  @map("display_name") @db.VarChar(160)
+  emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz(3)
   status          String   @default("ACTIVE") @db.VarChar(32)
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -193,4 +194,15 @@ model PasswordResetToken {
 
   @@index([userId, expiresAt])
   @@map("password_reset_tokens")
+}
+
+model RateLimitBucket {
+  keyHash    String   @map("key_hash") @db.Char(64)
+  windowStart DateTime @map("window_start") @db.Timestamptz(3)
+  hitCount   Int      @default(1) @map("hit_count")
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@id([keyHash, windowStart])
+  @@index([expiresAt])
+  @@map("rate_limit_buckets")
 }
