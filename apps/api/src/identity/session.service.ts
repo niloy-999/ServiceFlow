@@ -1,5 +1,7 @@
 import { Injectable, UnauthorizedException } from "@nestjs/common";
+import { Prisma } from "../generated/prisma/client.js";
 import { createHash, randomBytes } from "node:crypto";
+import { GlobalIdentityContextService } from "../database/global-identity-context.service.js";
 import { PrismaService } from "../database/prisma.service.js";
 
 const SESSION_LIFETIME_MS = 12 * 60 * 60 * 1000;
@@ -16,9 +18,17 @@ export interface ValidatedSession {
   expiresAt: Date;
 }
 
+interface LockedUser {
+  id: string;
+  status: string;
+}
+
 @Injectable()
 export class SessionService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly identityContext: GlobalIdentityContextService,
+  ) {}
 
   private generateToken(): string {
     return randomBytes(32).toString("base64url");
@@ -32,24 +42,121 @@ export class SessionService {
     return SESSION_SECRET_PATTERN.test(token);
   }
 
+  private async lockActiveUser(
+    tx: Parameters<Parameters<PrismaService["$transaction"]>[0]>[0],
+    userId: string,
+  ): Promise<boolean> {
+    const users = await tx.$queryRaw<LockedUser[]>`
+      SELECT id, status
+      FROM users
+      WHERE id = ${userId}::uuid
+      FOR UPDATE
+    `;
+
+    return users.length === 1 && users[0]?.status === "ACTIVE";
+  }
+
   async createSession(userId: string, userAgent?: string): Promise<CreatedSession> {
-    const user = await this.prisma.user.findFirst({
-      where: { id: userId, status: "ACTIVE" },
-      select: { id: true },
+    return this.identityContext.withGlobalIdentityContext({ userId }, async (tx) => {
+      if (!(await this.lockActiveUser(tx, userId))) {
+        throw new UnauthorizedException("An active user is required to create a session.");
+      }
+
+      const mfa = await tx.userMfa.findUnique({
+        where: { userId },
+        select: { status: true },
+      });
+
+      if (mfa?.status === "ENABLED") {
+        throw new UnauthorizedException("MFA verification is required.");
+      }
+
+      const token = this.generateToken();
+      const expiresAt = new Date(Date.now() + SESSION_LIFETIME_MS);
+
+      await tx.authSession.create({
+        data: {
+          userId,
+          sessionHash: this.hashToken(token),
+          expiresAt,
+          ...(userAgent === undefined ? {} : { userAgent: userAgent.slice(0, 512) }),
+        },
+      });
+
+      return { token, expiresAt };
+    });
+  }
+
+  /**
+   * Creates a password-authenticated session inside the caller's transaction.
+   * The caller must have already verified the password under the user lock.
+   */
+  async createPasswordVerifiedSession(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    userAgent?: string,
+  ): Promise<CreatedSession> {
+    if (!(await this.lockActiveUser(tx, userId))) {
+      throw new UnauthorizedException("An active user is required to create a session.");
+    }
+
+    const mfa = await tx.userMfa.findUnique({
+      where: { userId },
+      select: { status: true },
     });
 
-    if (!user) {
-      throw new UnauthorizedException("An active user is required to create a session.");
+    if (mfa?.status === "ENABLED") {
+      throw new UnauthorizedException("MFA verification is required.");
     }
 
     const token = this.generateToken();
     const expiresAt = new Date(Date.now() + SESSION_LIFETIME_MS);
 
-    await this.prisma.authSession.create({
+    await tx.authSession.create({
       data: {
         userId,
         sessionHash: this.hashToken(token),
         expiresAt,
+        ...(userAgent === undefined ? {} : { userAgent: userAgent.slice(0, 512) }),
+      },
+    });
+
+    return { token, expiresAt };
+  }
+
+  /**
+   * Creates a session inside the caller's transaction after MFA verification.
+   * Only the MFA challenge verification service should call this method.
+   */
+  async createMfaVerifiedSession(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    userAgent?: string,
+  ): Promise<CreatedSession> {
+    if (!(await this.lockActiveUser(tx, userId))) {
+      throw new UnauthorizedException("An active user is required to create a session.");
+    }
+
+    const mfa = await tx.userMfa.findUnique({
+      where: { userId },
+      select: { status: true, enabledAt: true },
+    });
+
+    const now = new Date();
+
+    if (mfa?.status !== "ENABLED" || !mfa.enabledAt || now < mfa.enabledAt) {
+      throw new UnauthorizedException("MFA verification is required.");
+    }
+
+    const token = this.generateToken();
+    const expiresAt = new Date(now.getTime() + SESSION_LIFETIME_MS);
+
+    await tx.authSession.create({
+      data: {
+        userId,
+        sessionHash: this.hashToken(token),
+        expiresAt,
+        mfaVerifiedAt: now,
         ...(userAgent === undefined ? {} : { userAgent: userAgent.slice(0, 512) }),
       },
     });
@@ -62,31 +169,69 @@ export class SessionService {
       return null;
     }
 
-    const session = await this.prisma.authSession.findFirst({
+    const sessionHash = this.hashToken(token);
+    const candidate = await this.prisma.authSession.findFirst({
       where: {
-        sessionHash: this.hashToken(token),
+        sessionHash,
         revokedAt: null,
         expiresAt: { gt: new Date() },
-        user: {
-          is: { status: "ACTIVE" },
-        },
+        user: { is: { status: "ACTIVE" } },
       },
-      select: {
-        id: true,
-        userId: true,
-        expiresAt: true,
-      },
+      select: { id: true, userId: true },
     });
 
-    if (!session) {
+    if (!candidate) {
       return null;
     }
 
-    return {
-      sessionId: session.id,
-      userId: session.userId,
-      expiresAt: session.expiresAt,
-    };
+    return this.identityContext.withGlobalIdentityContext(
+      { userId: candidate.userId },
+      async (tx) => {
+        if (!(await this.lockActiveUser(tx, candidate.userId))) {
+          return null;
+        }
+
+        const session = await tx.authSession.findFirst({
+          where: {
+            id: candidate.id,
+            sessionHash,
+            userId: candidate.userId,
+            revokedAt: null,
+            expiresAt: { gt: new Date() },
+          },
+          select: {
+            id: true,
+            userId: true,
+            expiresAt: true,
+            mfaVerifiedAt: true,
+          },
+        });
+
+        if (!session) {
+          return null;
+        }
+
+        const mfa = await tx.userMfa.findUnique({
+          where: { userId: candidate.userId },
+          select: { status: true, enabledAt: true },
+        });
+
+        if (
+          mfa?.status === "ENABLED" &&
+          (!mfa.enabledAt ||
+            !session.mfaVerifiedAt ||
+            session.mfaVerifiedAt < mfa.enabledAt)
+        ) {
+          return null;
+        }
+
+        return {
+          sessionId: session.id,
+          userId: session.userId,
+          expiresAt: session.expiresAt,
+        };
+      },
+    );
   }
 
   async revokeSession(token: string): Promise<boolean> {
@@ -99,9 +244,7 @@ export class SessionService {
         sessionHash: this.hashToken(token),
         revokedAt: null,
       },
-      data: {
-        revokedAt: new Date(),
-      },
+      data: { revokedAt: new Date() },
     });
 
     return result.count === 1;
@@ -113,9 +256,7 @@ export class SessionService {
         userId,
         revokedAt: null,
       },
-      data: {
-        revokedAt: new Date(),
-      },
+      data: { revokedAt: new Date() },
     });
 
     return result.count;
@@ -127,55 +268,89 @@ export class SessionService {
     }
 
     const now = new Date();
-    const newToken = this.generateToken();
-    const expiresAt = new Date(now.getTime() + SESSION_LIFETIME_MS);
     const sessionHash = this.hashToken(token);
-
-    return this.prisma.$transaction(async (tx) => {
-      const oldSession = await tx.authSession.findFirst({
-        where: {
-          sessionHash,
-          revokedAt: null,
-          expiresAt: { gt: now },
-          user: {
-            is: { status: "ACTIVE" },
-          },
-        },
-        select: {
-          id: true,
-          userId: true,
-        },
-      });
-
-      if (!oldSession) {
-        return null;
-      }
-
-      const revoked = await tx.authSession.updateMany({
-        where: {
-          id: oldSession.id,
-          revokedAt: null,
-          expiresAt: { gt: now },
-        },
-        data: {
-          revokedAt: now,
-        },
-      });
-
-      if (revoked.count !== 1) {
-        return null;
-      }
-
-      await tx.authSession.create({
-        data: {
-          userId: oldSession.userId,
-          sessionHash: this.hashToken(newToken),
-          expiresAt,
-          ...(userAgent === undefined ? {} : { userAgent: userAgent.slice(0, 512) }),
-        },
-      });
-
-      return { token: newToken, expiresAt };
+    const candidate = await this.prisma.authSession.findFirst({
+      where: {
+        sessionHash,
+        revokedAt: null,
+        expiresAt: { gt: now },
+        user: { is: { status: "ACTIVE" } },
+      },
+      select: { id: true, userId: true },
     });
+
+    if (!candidate) {
+      return null;
+    }
+
+    return this.identityContext.withGlobalIdentityContext(
+      { userId: candidate.userId },
+      async (tx) => {
+        if (!(await this.lockActiveUser(tx, candidate.userId))) {
+          return null;
+        }
+
+        const oldSession = await tx.authSession.findFirst({
+          where: {
+            id: candidate.id,
+            sessionHash,
+            userId: candidate.userId,
+            revokedAt: null,
+            expiresAt: { gt: now },
+          },
+          select: {
+            id: true,
+            userId: true,
+            mfaVerifiedAt: true,
+          },
+        });
+
+        if (!oldSession) {
+          return null;
+        }
+
+        const mfa = await tx.userMfa.findUnique({
+          where: { userId: candidate.userId },
+          select: { status: true, enabledAt: true },
+        });
+
+        if (
+          mfa?.status === "ENABLED" &&
+          (!mfa.enabledAt ||
+            !oldSession.mfaVerifiedAt ||
+            oldSession.mfaVerifiedAt < mfa.enabledAt)
+        ) {
+          return null;
+        }
+
+        const newToken = this.generateToken();
+        const expiresAt = new Date(now.getTime() + SESSION_LIFETIME_MS);
+
+        const revoked = await tx.authSession.updateMany({
+          where: {
+            id: oldSession.id,
+            revokedAt: null,
+            expiresAt: { gt: now },
+          },
+          data: { revokedAt: now },
+        });
+
+        if (revoked.count !== 1) {
+          return null;
+        }
+
+        await tx.authSession.create({
+          data: {
+            userId: oldSession.userId,
+            sessionHash: this.hashToken(newToken),
+            expiresAt,
+            mfaVerifiedAt: oldSession.mfaVerifiedAt,
+            ...(userAgent === undefined ? {} : { userAgent: userAgent.slice(0, 512) }),
+          },
+        });
+
+        return { token: newToken, expiresAt };
+      },
+    );
   }
 }

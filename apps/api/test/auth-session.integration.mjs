@@ -20,6 +20,15 @@ function hashToken(token) {
   return createHash("sha256").update(token).digest("hex");
 }
 
+async function enableMfa(enabledAt) {
+  await migrator.query(
+    `INSERT INTO user_mfa
+       (id, user_id, encrypted_secret, status, enabled_at, updated_at)
+     VALUES ($1, $2, $3, 'ENABLED', $4, NOW())`,
+    [randomUUID(), userId, Buffer.alloc(29, 1), enabledAt],
+  );
+}
+
 before(async () => {
   assert.ok(process.env.DATABASE_URL, "DATABASE_URL is required");
   assert.ok(process.env.MIGRATION_DATABASE_URL, "MIGRATION_DATABASE_URL is required");
@@ -63,6 +72,7 @@ after(async () => {
     if (migrator && fixturesCreated) {
       await migrator.query("BEGIN");
       try {
+        await migrator.query("DELETE FROM user_mfa WHERE user_id = $1", [userId]);
         await migrator.query("DELETE FROM auth_sessions WHERE user_id = $1", [userId]);
         await migrator.query("DELETE FROM users WHERE id = $1", [userId]);
         await migrator.query("COMMIT");
@@ -218,4 +228,102 @@ test("Concurrent rotation attempts produce exactly one replacement", async () =>
   assert.equal(replacements.length, 1);
   assert.equal(await sessions.validateSession(original.token), null);
   assert.ok(await sessions.validateSession(replacements[0].token));
+});
+
+test("MFA-enabled users cannot create password-only sessions", async () => {
+  const enabledAt = new Date(Date.now() - 60_000);
+  const before = await migrator.query(
+    "SELECT count(*)::int AS total FROM auth_sessions WHERE user_id = $1",
+    [userId],
+  );
+
+  await enableMfa(enabledAt);
+
+  try {
+    await assert.rejects(
+      sessions.createSession(userId),
+      (error) => error?.getStatus?.() === 401,
+    );
+
+    const after = await migrator.query(
+      "SELECT count(*)::int AS total FROM auth_sessions WHERE user_id = $1",
+      [userId],
+    );
+
+    assert.equal(after.rows[0].total, before.rows[0].total);
+  } finally {
+    await migrator.query("DELETE FROM user_mfa WHERE user_id = $1", [userId]);
+  }
+});
+
+test("MFA enforcement rejects sessions verified before MFA enablement", async () => {
+  const original = await sessions.createSession(userId);
+  const enabledAt = new Date(Date.now() - 60_000);
+
+  await enableMfa(enabledAt);
+
+  try {
+    await migrator.query(
+      `UPDATE auth_sessions
+       SET mfa_verified_at = $1
+       WHERE session_hash = $2`,
+      [new Date(enabledAt.getTime() - 1_000), hashToken(original.token)],
+    );
+
+    assert.equal(await sessions.validateSession(original.token), null);
+
+    await migrator.query(
+      `UPDATE auth_sessions
+       SET mfa_verified_at = $1
+       WHERE session_hash = $2`,
+      [enabledAt, hashToken(original.token)],
+    );
+
+    const validated = await sessions.validateSession(original.token);
+    assert.ok(validated);
+    assert.equal(validated.userId, userId);
+  } finally {
+    await migrator.query("DELETE FROM user_mfa WHERE user_id = $1", [userId]);
+  }
+});
+
+test("MFA session rotation rejects unverified sessions and preserves verified timestamps", async () => {
+  const original = await sessions.createSession(userId);
+  const enabledAt = new Date(Date.now() - 60_000);
+
+  await enableMfa(enabledAt);
+
+  try {
+    assert.equal(await sessions.rotateSession(original.token), null);
+
+    const unchanged = await migrator.query(
+      "SELECT revoked_at FROM auth_sessions WHERE session_hash = $1",
+      [hashToken(original.token)],
+    );
+    assert.equal(unchanged.rows[0].revoked_at, null);
+
+    await migrator.query(
+      `UPDATE auth_sessions
+       SET mfa_verified_at = $1
+       WHERE session_hash = $2`,
+      [enabledAt, hashToken(original.token)],
+    );
+
+    const replacement = await sessions.rotateSession(original.token);
+    assert.ok(replacement);
+
+    const stored = await migrator.query(
+      "SELECT mfa_verified_at FROM auth_sessions WHERE session_hash = $1",
+      [hashToken(replacement.token)],
+    );
+
+    assert.equal(
+      new Date(stored.rows[0].mfa_verified_at).getTime(),
+      enabledAt.getTime(),
+    );
+
+    assert.ok(await sessions.validateSession(replacement.token));
+  } finally {
+    await migrator.query("DELETE FROM user_mfa WHERE user_id = $1", [userId]);
+  }
 });

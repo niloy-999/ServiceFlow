@@ -2,6 +2,7 @@ import { Injectable, InternalServerErrorException, UnauthorizedException } from 
 import { createHash, randomBytes } from "node:crypto";
 import { Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../database/prisma.service.js";
+import { GlobalIdentityContextService } from "../database/global-identity-context.service.js";
 import { EmailDeliveryService } from "./email-delivery.service.js";
 import { PasswordService } from "./password.service.js";
 import { SessionService, type CreatedSession } from "./session.service.js";
@@ -12,6 +13,19 @@ const EMAIL_VERIFICATION_LIFETIME_MS = 30 * 60 * 1000;
 
 const DUMMY_PASSWORD_HASH =
   "$argon2id$v=19$m=19456,t=2,p=1$xfQtUT6PK90ME219my5GPw$X2eX51EXnNJGThumtAEOcn1n9n0qHZMh0bdn0eyX3/c";
+
+const MFA_CHALLENGE_LIFETIME_MS = 5 * 60 * 1000;
+
+interface LockedLoginUser {
+  id: string;
+  status: string;
+  password_hash: string;
+  email_verified_at: Date | null;
+}
+
+export type LoginResult =
+  | { kind: "SESSION"; session: CreatedSession }
+  | { kind: "MFA_REQUIRED"; challengeToken: string; expiresAt: Date };
 
 const REGISTRATION_RESPONSE = {
   message:
@@ -25,6 +39,7 @@ export class AuthService {
     private readonly passwordService: PasswordService,
     private readonly emailDeliveryService: EmailDeliveryService,
     private readonly sessionService: SessionService,
+    private readonly identityContext: GlobalIdentityContextService,
   ) {}
 
   async register(input: RegisterDto): Promise<typeof REGISTRATION_RESPONSE> {
@@ -251,7 +266,7 @@ export class AuthService {
     return genericResponse;
   }
 
-  async login(input: LoginDto, userAgent?: string): Promise<CreatedSession> {
+  async login(input: LoginDto, userAgent?: string): Promise<LoginResult> {
     const email = input.email.trim().toLowerCase();
 
     const user = await this.prisma.user.findUnique({
@@ -265,13 +280,73 @@ export class AuthService {
     });
 
     const passwordHash = user?.passwordHash ?? DUMMY_PASSWORD_HASH;
-    const passwordMatches = await this.passwordService.verifyPassword(input.password, passwordHash);
+    const passwordMatches = await this.passwordService.verifyPassword(
+      input.password,
+      passwordHash,
+    );
 
     if (!user || !passwordMatches || user.status !== "ACTIVE" || user.emailVerifiedAt === null) {
       throw new UnauthorizedException("Invalid email or password.");
     }
 
-    return this.sessionService.createSession(user.id, userAgent);
+    return this.identityContext.withGlobalIdentityContext(
+      { userId: user.id },
+      async (tx) => {
+        const lockedUsers = await tx.$queryRaw<LockedLoginUser[]>`
+          SELECT id, status, password_hash, email_verified_at
+          FROM users
+          WHERE id = ${user.id}::uuid
+          FOR UPDATE
+        `;
+
+        const lockedUser = lockedUsers[0];
+
+        if (
+          !lockedUser ||
+          lockedUser.status !== "ACTIVE" ||
+          lockedUser.email_verified_at === null ||
+          lockedUser.password_hash !== passwordHash
+        ) {
+          throw new UnauthorizedException("Invalid email or password.");
+        }
+
+        const mfa = await tx.userMfa.findUnique({
+          where: { userId: user.id },
+          select: { status: true },
+        });
+
+        if (mfa?.status === "ENABLED") {
+          const challengeToken = randomBytes(32).toString("base64url");
+          const tokenHash = createHash("sha256")
+            .update(challengeToken)
+            .digest("hex");
+          const now = new Date();
+          const expiresAt = new Date(now.getTime() + MFA_CHALLENGE_LIFETIME_MS);
+
+          await tx.mfaChallenge.create({
+            data: {
+              userId: user.id,
+              tokenHash,
+              expiresAt,
+            },
+          });
+
+          return {
+            kind: "MFA_REQUIRED",
+            challengeToken,
+            expiresAt,
+          };
+        }
+
+        const session = await this.sessionService.createPasswordVerifiedSession(
+          tx,
+          user.id,
+          userAgent,
+        );
+
+        return { kind: "SESSION", session };
+      },
+    );
   }
 
   async getCurrentUser(userId: string) {

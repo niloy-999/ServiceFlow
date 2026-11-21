@@ -16,20 +16,28 @@ enum BusinessStatus {
 }
 
 model User {
-  id              String   @id @default(uuid()) @db.Uuid
-  emailNormalized String   @unique @map("email_normalized") @db.VarChar(320)
-  passwordHash    String   @map("password_hash") @db.VarChar(255)
-  displayName     String?  @map("display_name") @db.VarChar(160)
+  id              String    @id @default(uuid()) @db.Uuid
+  emailNormalized String    @unique @map("email_normalized") @db.VarChar(320)
+  passwordHash    String    @map("password_hash") @db.VarChar(255)
+  displayName     String?   @map("display_name") @db.VarChar(160)
   emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz(3)
-  status          String   @default("ACTIVE") @db.VarChar(32)
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
-  version         BigInt   @default(1)
+  status          String    @default("ACTIVE") @db.VarChar(32)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version         BigInt    @default(1)
 
   memberships             TenantMembership[]
   authSessions            AuthSession[]
   emailVerificationTokens EmailVerificationToken[]
   passwordResetTokens     PasswordResetToken[]
+
+  platformAdminGrants        PlatformAdministrator[] @relation("PlatformAdminSubject")
+  platformAdminGrantsIssued  PlatformAdministrator[] @relation("PlatformAdminGrantor")
+  platformAdminGrantsRevoked PlatformAdministrator[] @relation("PlatformAdminRevoker")
+  mfa                        UserMfa?
+  mfaRecoveryCodes           MfaRecoveryCode[]
+  mfaChallenges              MfaChallenge[]
+  auditEvents                AuditEvent[]
 
   @@map("users")
 }
@@ -48,6 +56,7 @@ model Business {
   memberships TenantMembership[]
   branches    Branch[]
   roles       Role[]
+  auditEvents AuditEvent[]
 
   @@map("businesses")
 }
@@ -152,14 +161,15 @@ model MembershipRole {
 }
 
 model AuthSession {
-  id          String    @id @default(uuid()) @db.Uuid
-  userId      String    @map("user_id") @db.Uuid
-  sessionHash String    @unique @map("session_hash") @db.Char(64)
-  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(3)
-  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(3)
-  lastSeenAt  DateTime? @map("last_seen_at") @db.Timestamptz(3)
-  userAgent   String?   @map("user_agent") @db.VarChar(512)
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @map("user_id") @db.Uuid
+  sessionHash   String    @unique @map("session_hash") @db.Char(64)
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt     DateTime? @map("revoked_at") @db.Timestamptz(3)
+  lastSeenAt    DateTime? @map("last_seen_at") @db.Timestamptz(3)
+  userAgent     String?   @map("user_agent") @db.VarChar(512)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  mfaVerifiedAt DateTime? @map("mfa_verified_at") @db.Timestamptz(3)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -197,12 +207,100 @@ model PasswordResetToken {
 }
 
 model RateLimitBucket {
-  keyHash    String   @map("key_hash") @db.Char(64)
+  keyHash     String   @map("key_hash") @db.Char(64)
   windowStart DateTime @map("window_start") @db.Timestamptz(3)
-  hitCount   Int      @default(1) @map("hit_count")
-  expiresAt  DateTime @map("expires_at") @db.Timestamptz(3)
+  hitCount    Int      @default(1) @map("hit_count")
+  expiresAt   DateTime @map("expires_at") @db.Timestamptz(3)
 
   @@id([keyHash, windowStart])
   @@index([expiresAt])
   @@map("rate_limit_buckets")
+}
+
+model PlatformAdministrator {
+  id              String    @id @default(uuid()) @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  role            String    @db.VarChar(40)
+  status          String    @default("ACTIVE") @db.VarChar(32)
+  grantedByUserId String?   @map("granted_by_user_id") @db.Uuid
+  grantedAt       DateTime  @default(now()) @map("granted_at") @db.Timestamptz(3)
+  revokedByUserId String?   @map("revoked_by_user_id") @db.Uuid
+  revokedAt       DateTime? @map("revoked_at") @db.Timestamptz(3)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version         BigInt    @default(1)
+
+  user      User  @relation("PlatformAdminSubject", fields: [userId], references: [id], onDelete: Restrict)
+  grantedBy User? @relation("PlatformAdminGrantor", fields: [grantedByUserId], references: [id], onDelete: Restrict)
+  revokedBy User? @relation("PlatformAdminRevoker", fields: [revokedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([status, role])
+  @@map("platform_administrators")
+}
+
+model UserMfa {
+  id                   String    @id @default(uuid()) @db.Uuid
+  userId               String    @unique @map("user_id") @db.Uuid
+  encryptedSecret      Bytes     @map("encrypted_secret") @db.ByteA
+  status               String    @default("PENDING") @db.VarChar(16)
+  lastAcceptedTimeStep BigInt?   @map("last_accepted_time_step")
+  enabledAt            DateTime? @map("enabled_at") @db.Timestamptz(3)
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@map("user_mfa")
+}
+
+model MfaRecoveryCode {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  codeHash   String    @unique @map("code_hash") @db.Char(64)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, consumedAt])
+  @@map("mfa_recovery_codes")
+}
+
+model MfaChallenge {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash") @db.Char(64)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(3)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId, expiresAt])
+  @@map("mfa_challenges")
+}
+
+model AuditEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  occurredAt  DateTime @default(now()) @map("occurred_at") @db.Timestamptz(3)
+  actorType   String   @map("actor_type") @db.VarChar(16)
+  actorUserId String?  @map("actor_user_id") @db.Uuid
+  tenantId    String?  @map("tenant_id") @db.Uuid
+  action      String   @db.VarChar(120)
+  targetType  String   @map("target_type") @db.VarChar(80)
+  targetId    String?  @map("target_id") @db.VarChar(160)
+  outcome     String   @db.VarChar(16)
+  requestId   String?  @map("request_id") @db.VarChar(128)
+  ipAddress   String?  @map("ip_address") @db.VarChar(64)
+  userAgent   String?  @map("user_agent") @db.VarChar(512)
+  metadata    Json     @default("{}") @db.JsonB
+
+  actor  User?     @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
+  tenant Business? @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  @@index([occurredAt])
+  @@index([actorUserId, occurredAt])
+  @@index([tenantId, occurredAt])
+  @@index([targetType, targetId])
+  @@map("audit_events")
 }

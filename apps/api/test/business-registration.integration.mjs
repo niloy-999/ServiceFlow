@@ -9,6 +9,7 @@ import { Test } from "@nestjs/testing";
 import { Client } from "pg";
 
 import { AppModule } from "../dist/app.module.js";
+import { AuditService } from "../dist/audit/audit.service.js";
 import { PrismaService } from "../dist/database/prisma.service.js";
 import { CsrfService } from "../dist/identity/csrf.service.js";
 import { SessionService } from "../dist/identity/session.service.js";
@@ -37,6 +38,8 @@ let app;
 let migrator;
 let sessions;
 let csrf;
+let prisma;
+let auditService;
 let apiBaseUrl;
 
 function cookieHeader(token) {
@@ -144,7 +147,8 @@ before(async () => {
   sessions = app.get(SessionService);
   csrf = app.get(CsrfService);
 
-  const prisma = app.get(PrismaService);
+  prisma = app.get(PrismaService);
+  auditService = app.get(AuditService);
 
   const appIdentity = await prisma.$queryRaw`
     SELECT current_user AS role, current_database() AS database
@@ -174,6 +178,16 @@ after(async () => {
         const cleanupBusinessIds = [
           ...new Set([...businessIds, ...ownedBusinesses.rows.map((row) => row.tenant_id)]),
         ];
+
+        // Test teardown only: temporarily disable immutability for fixture cleanup.
+        await migrator.query("ALTER TABLE audit_events DISABLE TRIGGER audit_events_immutable");
+
+        await migrator.query(
+          "DELETE FROM audit_events WHERE actor_user_id = ANY($1::uuid[]) OR tenant_id = ANY($2::uuid[])",
+          [testUserIds, cleanupBusinessIds],
+        );
+
+        await migrator.query("ALTER TABLE audit_events ENABLE TRIGGER audit_events_immutable");
 
         await migrator.query("DELETE FROM tenant_memberships WHERE user_id = ANY($1::uuid[])", [
           testUserIds,
@@ -277,6 +291,21 @@ test("Verified users receive pending businesses and pending memberships", async 
   assert.equal(storedMembership.rows[0].status, "PENDING");
   assert.equal(storedMembership.rows[0].tenant_id, result.business.id);
   assert.equal(storedMembership.rows[0].user_id, users.applicant.id);
+
+  const auditEvent = await migrator.query(
+    `SELECT actor_type, actor_user_id, tenant_id, action, target_type, target_id, outcome
+     FROM audit_events
+     WHERE tenant_id = $1 AND action = $2`,
+    [result.business.id, "business.registration.submitted"],
+  );
+
+  assert.equal(auditEvent.rowCount, 1);
+  assert.equal(auditEvent.rows[0].actor_type, "USER");
+  assert.equal(auditEvent.rows[0].actor_user_id, users.applicant.id);
+  assert.equal(auditEvent.rows[0].tenant_id, result.business.id);
+  assert.equal(auditEvent.rows[0].target_type, "business");
+  assert.equal(auditEvent.rows[0].target_id, result.business.id);
+  assert.equal(auditEvent.rows[0].outcome, "SUCCESS");
 });
 
 test("Registration history is private and pending memberships are not operational", async () => {
@@ -309,4 +338,56 @@ test("Registration history is private and pending memberships are not operationa
 
   assert.equal(operationalMemberships.status, 200);
   assert.deepEqual(await operationalMemberships.json(), { memberships: [] });
+});
+
+test("Global audit events require an empty tenant context", async () => {
+  const eventId = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`
+      SELECT set_config('app.user_id', ${users.other.id}, true)
+    `;
+
+    return auditService.record(tx, {
+      actorUserId: users.other.id,
+      tenantId: null,
+      action: "platform.audit.global_test",
+      targetType: "test",
+      targetId: randomUUID(),
+      outcome: "SUCCESS",
+    });
+  });
+
+  const storedEvent = await migrator.query(
+    `SELECT actor_type, actor_user_id, tenant_id, action, outcome
+     FROM audit_events
+     WHERE id = $1::uuid`,
+    [eventId],
+  );
+
+  assert.equal(storedEvent.rowCount, 1);
+  assert.equal(storedEvent.rows[0].actor_type, "USER");
+  assert.equal(storedEvent.rows[0].actor_user_id, users.other.id);
+  assert.equal(storedEvent.rows[0].tenant_id, null);
+  assert.equal(storedEvent.rows[0].action, "platform.audit.global_test");
+  assert.equal(storedEvent.rows[0].outcome, "SUCCESS");
+
+  await assert.rejects(
+    prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`
+        SELECT set_config('app.user_id', ${users.other.id}, true)
+      `;
+
+      await tx.$queryRaw`
+        SELECT set_config('app.tenant_id', ${randomUUID()}, true)
+      `;
+
+      return auditService.record(tx, {
+        actorUserId: users.other.id,
+        tenantId: null,
+        action: "platform.audit.invalid_global_test",
+        targetType: "test",
+        targetId: randomUUID(),
+        outcome: "SUCCESS",
+      });
+    }),
+  );
 });

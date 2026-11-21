@@ -2,6 +2,7 @@ import { ForbiddenException, Injectable } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 
 import { PrismaService } from "../database/prisma.service.js";
+import { AuditService } from "../audit/audit.service.js";
 
 interface CreatedBusinessRow {
   id: string;
@@ -30,7 +31,10 @@ function createBusinessSlug(name: string): string {
 
 @Injectable()
 export class BusinessRegistrationService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditService: AuditService,
+  ) {}
 
   async register(userId: string, businessName: string) {
     const name = businessName.trim();
@@ -108,6 +112,15 @@ export class BusinessRegistrationService {
       if (!business) {
         throw new Error("Business registration did not return the created business.");
       }
+
+      await this.auditService.record(tx, {
+        actorUserId: userId,
+        tenantId: businessId,
+        action: "business.registration.submitted",
+        targetType: "business",
+        targetId: businessId,
+        outcome: "SUCCESS",
+      });
 
       return {
         membershipId,

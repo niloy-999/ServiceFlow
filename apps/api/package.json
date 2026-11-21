@@ -12,7 +12,10 @@
     "test:auth-session": "node --test test/auth-session.integration.mjs",
     "test:auth-registration": "node --test test/auth-registration.integration.mjs",
     "test:rate-limit": "node --test test/rate-limit.integration.mjs",
-    "test:business-registration": "node --test test/business-registration.integration.mjs"
+    "test:business-registration": "node --test test/business-registration.integration.mjs",
+    "test:mfa-crypto": "node --test test/mfa-crypto.service.test.mjs",
+    "test:mfa-challenge": "node --test test/mfa-challenge.integration.mjs",
+    "test:global-identity-context": "node --test test/global-identity-context.integration.mjs"
   },
   "dependencies": {
     "@nestjs/common": "12.5.1",

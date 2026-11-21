@@ -13,9 +13,11 @@ import {
   UnauthorizedException,
   UseGuards,
 } from "@nestjs/common";
+import { createHash } from "node:crypto";
 import { RateLimitService } from "../rate-limit/rate-limit.service.js";
 import { AuthService } from "./auth.service.js";
 import { MembershipService } from "./membership.service.js";
+import { MfaChallengeService } from "./mfa-challenge.service.js";
 import { assertFrontendOrigin } from "./request-origin.js";
 import { AuthenticatedRequest, SessionAuthGuard } from "./session-auth.guard.js";
 import { clearSessionCookie, createSessionCookie, readSessionCookie } from "./session-cookie.js";
@@ -25,6 +27,7 @@ import { LoginDto } from "./dto/login.dto.js";
 import { RegisterDto } from "./dto/register.dto.js";
 import { ResendVerificationDto } from "./dto/resend-verification.dto.js";
 import { VerifyEmailDto } from "./dto/verify-email.dto.js";
+import { VerifyMfaDto } from "./dto/verify-mfa.dto.js";
 
 interface ClientRequest extends AuthenticatedRequest {
   socket: {
@@ -49,6 +52,7 @@ export class AuthController {
     private readonly csrfService: CsrfService,
     private readonly sessionService: SessionService,
     private readonly membershipService: MembershipService,
+    private readonly mfaChallengeService: MfaChallengeService,
   ) {}
 
   private async enforceLimit(
@@ -177,13 +181,69 @@ export class AuthController {
       response,
     );
 
+    response.setHeader("Cache-Control", "no-store");
+
     const userAgent = request.headers["user-agent"];
-    const session = await this.authService.login(
+    const result = await this.authService.login(
       input,
       typeof userAgent === "string" ? userAgent : undefined,
     );
 
+    if (result.kind === "MFA_REQUIRED") {
+      return {
+        mfaRequired: true,
+        challengeToken: result.challengeToken,
+        expiresAt: result.expiresAt,
+      };
+    }
+
+    const session = result.session;
     response.setHeader("Set-Cookie", createSessionCookie(session.token, session.expiresAt));
+
+    return {
+      mfaRequired: false,
+      csrfToken: this.csrfService.generateToken(session.token),
+      expiresAt: session.expiresAt,
+    };
+  }
+
+  @Post("mfa/verify")
+  @HttpCode(HttpStatus.OK)
+  async verifyMfa(
+    @Body() input: VerifyMfaDto,
+    @Req() request: ClientRequest,
+    @Res({ passthrough: true }) response: ResponseHeaders,
+  ) {
+    assertFrontendOrigin(request.headers.origin);
+    response.setHeader("Cache-Control", "no-store");
+
+    const clientIp = this.getClientIp(request);
+    await this.enforceLimit("mfa-verify", "ip", clientIp, 20, 15 * 60, response);
+
+    const challengeHash = createHash("sha256")
+      .update(input.challengeToken)
+      .digest("hex");
+
+    await this.enforceLimit(
+      "mfa-verify",
+      "challenge",
+      challengeHash,
+      5,
+      15 * 60,
+      response,
+    );
+
+    const userAgent = request.headers["user-agent"];
+    const session = await this.mfaChallengeService.verify(
+      input.challengeToken,
+      input.code,
+      typeof userAgent === "string" ? userAgent : undefined,
+    );
+
+    response.setHeader(
+      "Set-Cookie",
+      createSessionCookie(session.token, session.expiresAt),
+    );
 
     return {
       csrfToken: this.csrfService.generateToken(session.token),
