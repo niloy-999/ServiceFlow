@@ -265,6 +265,59 @@ test("Invalid, unverified, and inactive accounts receive the same generic login 
   }
 });
 
+test("Active platform administrators without MFA cannot log in or receive a session", async () => {
+  const adminEmail = `${randomUUID()}@example.invalid`;
+  let adminUserId;
+
+  try {
+    adminUserId = await createUser(adminEmail);
+
+    await migrator.query(
+      `INSERT INTO platform_administrators (
+         id, user_id, role, status, updated_at
+       )
+       VALUES ($1, $2, 'PLATFORM_ADMIN', 'ACTIVE', NOW())`,
+      [randomUUID(), adminUserId],
+    );
+
+    const response = await login(adminEmail);
+
+    assert.equal(response.status, 401);
+    assert.deepEqual(await response.json(), {
+      message: "Invalid email or password.",
+      error: "Unauthorized",
+      statusCode: 401,
+    });
+    assert.equal(response.headers.get("set-cookie"), null);
+
+    const stored = await migrator.query(
+      "SELECT count(*)::int AS total FROM auth_sessions WHERE user_id = $1",
+      [adminUserId],
+    );
+
+    assert.equal(stored.rows[0].total, 0);
+  } finally {
+    if (adminUserId) {
+      await migrator.query(
+        "DELETE FROM platform_administrators WHERE user_id = $1",
+        [adminUserId],
+      );
+      await migrator.query(
+        "DELETE FROM auth_sessions WHERE user_id = $1",
+        [adminUserId],
+      );
+      await migrator.query(
+        "DELETE FROM user_mfa WHERE user_id = $1",
+        [adminUserId],
+      );
+      await migrator.query(
+        "DELETE FROM users WHERE id = $1",
+        [adminUserId],
+      );
+    }
+  }
+});
+
 test("CSRF endpoint and logout reject missing, malformed, and cross-session credentials", async () => {
   const firstLogin = await login(users.login);
   const firstToken = getCookie(firstLogin);

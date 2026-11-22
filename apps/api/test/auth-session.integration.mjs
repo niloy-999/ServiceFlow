@@ -29,6 +29,33 @@ async function enableMfa(enabledAt) {
   );
 }
 
+async function createPlatformAdministrator({
+  status = "ACTIVE",
+  revoked = false,
+} = {}) {
+  await migrator.query(
+    `INSERT INTO platform_administrators (
+       id, user_id, role, status,
+       revoked_by_user_id, revoked_at, updated_at
+     )
+     VALUES ($1, $2, 'PLATFORM_ADMIN', $3, $4, $5, NOW())`,
+    [
+      randomUUID(),
+      userId,
+      status,
+      revoked ? userId : null,
+      revoked ? new Date() : null,
+    ],
+  );
+}
+
+async function deletePlatformAdministrator() {
+  await migrator.query(
+    "DELETE FROM platform_administrators WHERE user_id = $1",
+    [userId],
+  );
+}
+
 before(async () => {
   assert.ok(process.env.DATABASE_URL, "DATABASE_URL is required");
   assert.ok(process.env.MIGRATION_DATABASE_URL, "MIGRATION_DATABASE_URL is required");
@@ -72,6 +99,10 @@ after(async () => {
     if (migrator && fixturesCreated) {
       await migrator.query("BEGIN");
       try {
+        await migrator.query(
+          "DELETE FROM platform_administrators WHERE user_id = $1",
+          [userId],
+        );
         await migrator.query("DELETE FROM user_mfa WHERE user_id = $1", [userId]);
         await migrator.query("DELETE FROM auth_sessions WHERE user_id = $1", [userId]);
         await migrator.query("DELETE FROM users WHERE id = $1", [userId]);
@@ -252,6 +283,122 @@ test("MFA-enabled users cannot create password-only sessions", async () => {
 
     assert.equal(after.rows[0].total, before.rows[0].total);
   } finally {
+    await migrator.query("DELETE FROM user_mfa WHERE user_id = $1", [userId]);
+  }
+});
+
+test("Active platform administrators cannot create password-only sessions", async () => {
+  const before = await migrator.query(
+    "SELECT count(*)::int AS total FROM auth_sessions WHERE user_id = $1",
+    [userId],
+  );
+
+  await createPlatformAdministrator();
+
+  try {
+    await assert.rejects(
+      sessions.createSession(userId),
+      (error) => error?.getStatus?.() === 401,
+    );
+
+    const after = await migrator.query(
+      "SELECT count(*)::int AS total FROM auth_sessions WHERE user_id = $1",
+      [userId],
+    );
+
+    assert.equal(after.rows[0].total, before.rows[0].total);
+  } finally {
+    await deletePlatformAdministrator();
+  }
+});
+
+test("Active platform administrators cannot validate or rotate sessions without MFA", async () => {
+  const original = await sessions.createSession(userId);
+
+  await createPlatformAdministrator();
+
+  try {
+    assert.equal(await sessions.validateSession(original.token), null);
+    assert.equal(await sessions.rotateSession(original.token), null);
+
+    const stored = await migrator.query(
+      "SELECT revoked_at FROM auth_sessions WHERE session_hash = $1",
+      [hashToken(original.token)],
+    );
+
+    assert.equal(stored.rowCount, 1);
+    assert.equal(stored.rows[0].revoked_at, null);
+  } finally {
+    await deletePlatformAdministrator();
+  }
+});
+
+test("Suspended and revoked platform administrator grants do not enforce MFA", async () => {
+  const suspendedSession = await sessions.createSession(userId);
+
+  await createPlatformAdministrator({ status: "SUSPENDED" });
+
+  try {
+    assert.ok(await sessions.validateSession(suspendedSession.token));
+
+    const rotated = await sessions.rotateSession(suspendedSession.token);
+    assert.ok(rotated);
+    assert.ok(await sessions.validateSession(rotated.token));
+  } finally {
+    await deletePlatformAdministrator();
+  }
+
+  const revokedSession = await sessions.createSession(userId);
+
+  await createPlatformAdministrator({
+    status: "SUSPENDED",
+    revoked: true,
+  });
+
+  try {
+    assert.ok(await sessions.validateSession(revokedSession.token));
+
+    const rotated = await sessions.rotateSession(revokedSession.token);
+    assert.ok(rotated);
+    assert.ok(await sessions.validateSession(rotated.token));
+  } finally {
+    await deletePlatformAdministrator();
+  }
+});
+
+test("Active platform administrators cannot use old MFA sessions after MFA is disabled", async () => {
+  const original = await sessions.createSession(userId);
+  const enabledAt = new Date(Date.now() - 60_000);
+
+  await enableMfa(enabledAt);
+
+  try {
+    await migrator.query(
+      `UPDATE auth_sessions
+       SET mfa_verified_at = $1
+       WHERE session_hash = $2`,
+      [enabledAt, hashToken(original.token)],
+    );
+
+    await migrator.query(
+      "UPDATE user_mfa SET status = 'DISABLED' WHERE user_id = $1",
+      [userId],
+    );
+
+    await createPlatformAdministrator();
+
+    assert.equal(await sessions.validateSession(original.token), null);
+    assert.equal(await sessions.rotateSession(original.token), null);
+
+    const stored = await migrator.query(
+      "SELECT revoked_at FROM auth_sessions WHERE session_hash = $1",
+      [hashToken(original.token)],
+    );
+
+    assert.equal(stored.rowCount, 1);
+    assert.equal(stored.rows[0].revoked_at, null);
+  } finally {
+    await deletePlatformAdministrator();
     await migrator.query("DELETE FROM user_mfa WHERE user_id = $1", [userId]);
   }
 });

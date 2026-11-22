@@ -1873,6 +1873,196 @@ test("MFA disable requires fresh authentication and atomically revokes MFA crede
   );
 });
 
+
+test("Active platform administrators cannot disable MFA or consume a TOTP step", async () => {
+  const adminUserId = randomUUID();
+  const adminEmail = `${adminUserId}@example.invalid`;
+  const adminPassword = "integration-platform-admin-password";
+  const adminSecret = mfaCrypto.generateTotpSecret();
+  let fixtureCreated = false;
+
+  try {
+    const passwordHash = await passwords.hashPassword(adminPassword);
+
+    await migrator.query(
+      `INSERT INTO users (
+         id, email_normalized, password_hash,
+         email_verified_at, status, updated_at
+       )
+       VALUES ($1, $2, $3, NOW(), 'ACTIVE', NOW())`,
+      [adminUserId, adminEmail, passwordHash],
+    );
+    fixtureCreated = true;
+
+    await migrator.query(
+      `INSERT INTO user_mfa (
+         id, user_id, encrypted_secret, status, enabled_at, updated_at
+       )
+       VALUES ($1, $2, $3, 'ENABLED', NOW(), NOW())`,
+      [
+        randomUUID(),
+        adminUserId,
+        mfaCrypto.encryptSecret(adminSecret),
+      ],
+    );
+
+    await migrator.query(
+      `INSERT INTO platform_administrators (
+         id, user_id, role, status, updated_at
+       )
+       VALUES ($1, $2, 'PLATFORM_ADMIN', 'ACTIVE', NOW())`,
+      [randomUUID(), adminUserId],
+    );
+
+    const baseStep = Math.floor(Date.now() / 30000);
+    const loginStep = baseStep - 1;
+    const disableStep = baseStep;
+
+    const loginResponse = await fetch(
+      `${apiBaseUrl}/api/v1/auth/login`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: frontendOrigin,
+        },
+        body: JSON.stringify({
+          email: adminEmail,
+          password: adminPassword,
+        }),
+      },
+    );
+
+    assert.equal(loginResponse.status, 200);
+    const loginBody = await loginResponse.json();
+    assert.equal(loginBody.mfaRequired, true);
+
+    const verification = await verify(
+      loginBody.challengeToken,
+      mfaCrypto.generateTotpCode(adminSecret, loginStep),
+    );
+
+    assert.equal(verification.status, 200);
+    const verificationBody = await verification.json();
+    const sessionToken = getCookie(verification);
+    const csrfToken = verificationBody.csrfToken;
+
+    assert.match(csrfToken, /^[a-f0-9]{64}$/);
+
+    const disableResponse = await fetch(
+      `${apiBaseUrl}/api/v1/auth/mfa/disable`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: frontendOrigin,
+          Cookie: cookieHeader(sessionToken),
+          "x-csrf-token": csrfToken,
+        },
+        body: JSON.stringify({
+          password: adminPassword,
+          currentCode: mfaCrypto.generateTotpCode(
+            adminSecret,
+            disableStep,
+          ),
+        }),
+      },
+    );
+
+    assert.equal(disableResponse.status, 401);
+    assert.equal(
+      disableResponse.headers.get("cache-control"),
+      "no-store",
+    );
+
+    const state = await migrator.query(
+      `SELECT
+         m.status,
+         m.enabled_at,
+         m.last_accepted_time_step,
+         s.revoked_at
+       FROM user_mfa m
+       JOIN auth_sessions s
+         ON s.user_id = m.user_id
+        AND s.session_hash = $2
+       WHERE m.user_id = $1`,
+      [adminUserId, hashToken(sessionToken)],
+    );
+
+    assert.equal(state.rowCount, 1);
+    assert.equal(state.rows[0].status, "ENABLED");
+    assert.ok(state.rows[0].enabled_at);
+    assert.equal(
+      state.rows[0].last_accepted_time_step,
+      String(loginStep),
+    );
+    assert.equal(state.rows[0].revoked_at, null);
+
+    const audit = await migrator.query(
+      `SELECT action, outcome, count(*)::int AS total
+       FROM audit_events
+       WHERE actor_user_id = $1
+         AND action = 'auth.mfa.disable_failed'
+       GROUP BY action, outcome`,
+      [adminUserId],
+    );
+
+    assert.equal(audit.rowCount, 1);
+    assert.equal(audit.rows[0].outcome, "FAILURE");
+    assert.equal(audit.rows[0].total, 1);
+  } finally {
+    if (fixtureCreated) {
+      await migrator.query("BEGIN");
+      try {
+        await migrator.query(
+          "ALTER TABLE audit_events DISABLE TRIGGER audit_events_immutable",
+        );
+        await migrator.query(
+          "DELETE FROM audit_events WHERE actor_user_id = $1",
+          [adminUserId],
+        );
+        await migrator.query(
+          "ALTER TABLE audit_events ENABLE TRIGGER audit_events_immutable",
+        );
+
+        await migrator.query(
+          "DELETE FROM platform_administrators WHERE user_id = $1",
+          [adminUserId],
+        );
+        await migrator.query(
+          "DELETE FROM mfa_challenges WHERE user_id = $1",
+          [adminUserId],
+        );
+        await migrator.query(
+          "DELETE FROM mfa_enrollments WHERE user_id = $1",
+          [adminUserId],
+        );
+        await migrator.query(
+          "DELETE FROM mfa_recovery_codes WHERE user_id = $1",
+          [adminUserId],
+        );
+        await migrator.query(
+          "DELETE FROM user_mfa WHERE user_id = $1",
+          [adminUserId],
+        );
+        await migrator.query(
+          "DELETE FROM auth_sessions WHERE user_id = $1",
+          [adminUserId],
+        );
+        await migrator.query(
+          "DELETE FROM users WHERE id = $1",
+          [adminUserId],
+        );
+
+        await migrator.query("COMMIT");
+      } catch (error) {
+        await migrator.query("ROLLBACK");
+        throw error;
+      }
+    }
+  }
+});
+
 async function createActivationFixture({ expired = false } = {}) {
   const id = randomUUID();
   const enrollmentId = randomUUID();

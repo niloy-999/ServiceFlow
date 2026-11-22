@@ -1,5 +1,6 @@
 import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { Prisma } from "../generated/prisma/client.js";
+import { hasActivePlatformAdministrator } from "./platform-admin-policy.js";
 import { createHash, randomBytes } from "node:crypto";
 import { GlobalIdentityContextService } from "../database/global-identity-context.service.js";
 import { PrismaService } from "../database/prisma.service.js";
@@ -62,12 +63,14 @@ export class SessionService {
         throw new UnauthorizedException("An active user is required to create a session.");
       }
 
+      const isPlatformAdministrator =
+        await hasActivePlatformAdministrator(tx, userId);
       const mfa = await tx.userMfa.findUnique({
         where: { userId },
         select: { status: true },
       });
 
-      if (mfa?.status === "ENABLED") {
+      if (mfa?.status === "ENABLED" || isPlatformAdministrator) {
         throw new UnauthorizedException("MFA verification is required.");
       }
 
@@ -100,12 +103,14 @@ export class SessionService {
       throw new UnauthorizedException("An active user is required to create a session.");
     }
 
+    const isPlatformAdministrator =
+      await hasActivePlatformAdministrator(tx, userId);
     const mfa = await tx.userMfa.findUnique({
       where: { userId },
       select: { status: true },
     });
 
-    if (mfa?.status === "ENABLED") {
+    if (mfa?.status === "ENABLED" || isPlatformAdministrator) {
       throw new UnauthorizedException("MFA verification is required.");
     }
 
@@ -211,14 +216,17 @@ export class SessionService {
           return null;
         }
 
+        const isPlatformAdministrator =
+          await hasActivePlatformAdministrator(tx, candidate.userId);
         const mfa = await tx.userMfa.findUnique({
           where: { userId: candidate.userId },
           select: { status: true, enabledAt: true },
         });
 
         if (
-          mfa?.status === "ENABLED" &&
-          (!mfa.enabledAt ||
+          (mfa?.status === "ENABLED" || isPlatformAdministrator) &&
+          (mfa?.status !== "ENABLED" ||
+            !mfa.enabledAt ||
             !session.mfaVerifiedAt ||
             session.mfaVerifiedAt < mfa.enabledAt)
         ) {
@@ -309,14 +317,17 @@ export class SessionService {
           return null;
         }
 
+        const isPlatformAdministrator =
+          await hasActivePlatformAdministrator(tx, candidate.userId);
         const mfa = await tx.userMfa.findUnique({
           where: { userId: candidate.userId },
           select: { status: true, enabledAt: true },
         });
 
         if (
-          mfa?.status === "ENABLED" &&
-          (!mfa.enabledAt ||
+          (mfa?.status === "ENABLED" || isPlatformAdministrator) &&
+          (mfa?.status !== "ENABLED" ||
+            !mfa.enabledAt ||
             !oldSession.mfaVerifiedAt ||
             oldSession.mfaVerifiedAt < mfa.enabledAt)
         ) {

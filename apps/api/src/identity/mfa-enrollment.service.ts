@@ -2,6 +2,7 @@ import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import { AuditService } from "../audit/audit.service.js";
 import { GlobalIdentityContextService } from "../database/global-identity-context.service.js";
+import { hasActivePlatformAdministrator } from "./platform-admin-policy.js";
 import { MfaCryptoService } from "./mfa-crypto.service.js";
 import { PasswordService } from "./password.service.js";
 
@@ -544,6 +545,21 @@ export class MfaEnrollmentService {
             user.password_hash,
           ))
         ) {
+          await this.auditService.record(tx, {
+            actorUserId: userId,
+            tenantId: null,
+            action: "auth.mfa.disable_failed",
+            targetType: "USER_MFA",
+            targetId: userId,
+            outcome: "FAILURE",
+          });
+          return { kind: "INVALID" as const };
+        }
+
+        const isPlatformAdministrator =
+          await hasActivePlatformAdministrator(tx, userId);
+
+        if (isPlatformAdministrator) {
           await this.auditService.record(tx, {
             actorUserId: userId,
             tenantId: null,
