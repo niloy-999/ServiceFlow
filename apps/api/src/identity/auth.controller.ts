@@ -18,6 +18,7 @@ import { RateLimitService } from "../rate-limit/rate-limit.service.js";
 import { AuthService } from "./auth.service.js";
 import { MembershipService } from "./membership.service.js";
 import { MfaChallengeService } from "./mfa-challenge.service.js";
+import { MfaEnrollmentService } from "./mfa-enrollment.service.js";
 import { assertFrontendOrigin } from "./request-origin.js";
 import { AuthenticatedRequest, SessionAuthGuard } from "./session-auth.guard.js";
 import { clearSessionCookie, createSessionCookie, readSessionCookie } from "./session-cookie.js";
@@ -28,6 +29,10 @@ import { RegisterDto } from "./dto/register.dto.js";
 import { ResendVerificationDto } from "./dto/resend-verification.dto.js";
 import { VerifyEmailDto } from "./dto/verify-email.dto.js";
 import { VerifyMfaDto } from "./dto/verify-mfa.dto.js";
+import { StartMfaEnrollmentDto } from "./dto/start-mfa-enrollment.dto.js";
+import { ConfirmMfaEnrollmentDto } from "./dto/confirm-mfa-enrollment.dto.js";
+import { RegenerateMfaRecoveryCodesDto } from "./dto/regenerate-mfa-recovery-codes.dto.js";
+import { DisableMfaDto } from "./dto/disable-mfa.dto.js";
 
 interface ClientRequest extends AuthenticatedRequest {
   socket: {
@@ -53,6 +58,7 @@ export class AuthController {
     private readonly sessionService: SessionService,
     private readonly membershipService: MembershipService,
     private readonly mfaChallengeService: MfaChallengeService,
+    private readonly mfaEnrollmentService: MfaEnrollmentService,
   ) {}
 
   private async enforceLimit(
@@ -248,6 +254,192 @@ export class AuthController {
     return {
       csrfToken: this.csrfService.generateToken(session.token),
       expiresAt: session.expiresAt,
+    };
+  }
+
+  @Post("mfa/enrollment")
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SessionAuthGuard)
+  async startMfaEnrollment(
+    @Body() input: StartMfaEnrollmentDto,
+    @Req() request: ClientRequest,
+    @Res({ passthrough: true }) response: ResponseHeaders,
+  ) {
+    assertFrontendOrigin(request.headers.origin);
+
+    if (!request.authSession) {
+      throw new UnauthorizedException("Authentication is required.");
+    }
+
+    const sessionToken = this.getSessionToken(request);
+    this.verifyCsrf(request, sessionToken);
+    response.setHeader("Cache-Control", "no-store");
+
+    const userId = request.authSession.userId;
+    const clientIp = this.getClientIp(request);
+
+    await this.enforceLimit(
+      "mfa-enrollment-start",
+      "ip",
+      clientIp,
+      10,
+      15 * 60,
+      response,
+    );
+
+    await this.enforceLimit(
+      "mfa-enrollment-start",
+      "user",
+      userId,
+      5,
+      15 * 60,
+      response,
+    );
+
+    return this.mfaEnrollmentService.startEnrollment(userId, input.password);
+  }
+
+  @Post("mfa/enrollment/confirm")
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SessionAuthGuard)
+  async confirmMfaEnrollment(
+    @Body() input: ConfirmMfaEnrollmentDto,
+    @Req() request: ClientRequest,
+    @Res({ passthrough: true }) response: ResponseHeaders,
+  ) {
+    assertFrontendOrigin(request.headers.origin);
+
+    if (!request.authSession) {
+      throw new UnauthorizedException("Authentication is required.");
+    }
+
+    const sessionToken = this.getSessionToken(request);
+    this.verifyCsrf(request, sessionToken);
+    response.setHeader("Cache-Control", "no-store");
+
+    const userId = request.authSession.userId;
+    const clientIp = this.getClientIp(request);
+
+    await this.enforceLimit(
+      "mfa-enrollment-confirm",
+      "ip",
+      clientIp,
+      10,
+      15 * 60,
+      response,
+    );
+
+    await this.enforceLimit(
+      "mfa-enrollment-confirm",
+      "user",
+      userId,
+      5,
+      15 * 60,
+      response,
+    );
+
+    return this.mfaEnrollmentService.confirmEnrollment(
+      userId,
+      input.password,
+      input.pendingCode,
+      input.currentCode,
+    );
+  }
+
+  @Post("mfa/recovery-codes/regenerate")
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SessionAuthGuard)
+  async regenerateMfaRecoveryCodes(
+    @Body() input: RegenerateMfaRecoveryCodesDto,
+    @Req() request: ClientRequest,
+    @Res({ passthrough: true }) response: ResponseHeaders,
+  ) {
+    assertFrontendOrigin(request.headers.origin);
+    if (!request.authSession) {
+      throw new UnauthorizedException("Authentication is required.");
+    }
+
+    const sessionToken = this.getSessionToken(request);
+    this.verifyCsrf(request, sessionToken);
+    response.setHeader("Cache-Control", "no-store");
+
+    const userId = request.authSession.userId;
+    const clientIp = this.getClientIp(request);
+
+    await this.enforceLimit(
+      "mfa-recovery-regenerate",
+      "ip",
+      clientIp,
+      10,
+      15 * 60,
+      response,
+    );
+
+    await this.enforceLimit(
+      "mfa-recovery-regenerate",
+      "user",
+      userId,
+      5,
+      15 * 60,
+      response,
+    );
+
+    return this.mfaEnrollmentService.regenerateRecoveryCodes(
+      userId,
+      input.password,
+      input.currentCode,
+    );
+  }
+
+  @Post("mfa/disable")
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(SessionAuthGuard)
+  async disableMfa(
+    @Body() input: DisableMfaDto,
+    @Req() request: ClientRequest,
+    @Res({ passthrough: true }) response: ResponseHeaders,
+  ) {
+    assertFrontendOrigin(request.headers.origin);
+    if (!request.authSession) {
+      throw new UnauthorizedException("Authentication is required.");
+    }
+
+    const sessionToken = this.getSessionToken(request);
+    this.verifyCsrf(request, sessionToken);
+    response.setHeader("Cache-Control", "no-store");
+
+    const userId = request.authSession.userId;
+    const clientIp = this.getClientIp(request);
+
+    await this.enforceLimit(
+      "mfa-disable",
+      "ip",
+      clientIp,
+      10,
+      15 * 60,
+      response,
+    );
+
+    await this.enforceLimit(
+      "mfa-disable",
+      "user",
+      userId,
+      5,
+      15 * 60,
+      response,
+    );
+
+    const result = await this.mfaEnrollmentService.disableMfa(
+      userId,
+      input.password,
+      input.currentCode,
+    );
+
+    response.setHeader("Set-Cookie", clearSessionCookie());
+
+    return {
+      message: "MFA disabled. Sign in again.",
+      ...result,
     };
   }
 

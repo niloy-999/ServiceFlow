@@ -273,6 +273,7 @@ after(async () => {
         );
 
         await migrator.query("DELETE FROM mfa_challenges WHERE user_id = $1", [userId]);
+        await migrator.query("DELETE FROM mfa_enrollments WHERE user_id = $1", [userId]);
         await migrator.query("DELETE FROM mfa_recovery_codes WHERE user_id = $1", [userId]);
         await migrator.query("DELETE FROM user_mfa WHERE user_id = $1", [userId]);
         await migrator.query("DELETE FROM auth_sessions WHERE user_id = $1", [userId]);
@@ -813,3 +814,1143 @@ test("Different challenges cannot reuse the same TOTP time step concurrently", a
   );
   assert.equal(challenges.rows[0].consumed, 1);
 });
+
+test("MFA enrollment activation enforces ownership, expiry and one-time consumption", async () => {
+  const appUserCanExecute = await migrator.query(`
+    SELECT has_function_privilege(
+      'serviceflow_app',
+      'public.activate_mfa_enrollment(uuid, uuid, bigint)',
+      'EXECUTE'
+    ) AS allowed
+  `);
+  assert.equal(appUserCanExecute.rows[0].allowed, true);
+
+  const fixtures = [];
+
+  try {
+    const owner = await createActivationFixture();
+    fixtures.push(owner);
+
+    const otherUser = await createActivationFixture();
+    fixtures.push(otherUser);
+
+    const currentStep = Math.floor(Date.now() / 30000);
+
+    // A different user's identity context must not activate this enrollment.
+    await assert.rejects(
+      activateEnrollment({
+        contextUserId: otherUser.userId,
+        userId: owner.userId,
+        enrollmentId: owner.enrollmentId,
+        timeStep: currentStep,
+      }),
+      (error) => error.code === "42501",
+    );
+
+    const stillPending = await migrator.query(
+      "SELECT id FROM mfa_enrollments WHERE id = $1",
+      [owner.enrollmentId],
+    );
+    assert.equal(stillPending.rowCount, 1);
+
+    // A valid owner context activates and consumes the enrollment.
+    const enabledAt = await activateEnrollment({
+      contextUserId: owner.userId,
+      userId: owner.userId,
+      enrollmentId: owner.enrollmentId,
+      timeStep: currentStep,
+    });
+
+    assert.ok(enabledAt instanceof Date);
+
+    const activeMfa = await migrator.query(
+      `SELECT status, encrypted_secret, enabled_at,
+              last_accepted_time_step
+       FROM user_mfa
+       WHERE user_id = $1`,
+      [owner.userId],
+    );
+
+    assert.equal(activeMfa.rowCount, 1);
+    assert.equal(activeMfa.rows[0].status, "ENABLED");
+    assert.deepEqual(
+      activeMfa.rows[0].encrypted_secret,
+      owner.encryptedSecret,
+    );
+    assert.equal(
+      Number(activeMfa.rows[0].last_accepted_time_step),
+      currentStep,
+    );
+    assert.equal(
+      activeMfa.rows[0].enabled_at.getTime(),
+      enabledAt.getTime(),
+    );
+
+    const consumed = await migrator.query(
+      "SELECT id FROM mfa_enrollments WHERE id = $1",
+      [owner.enrollmentId],
+    );
+    assert.equal(consumed.rowCount, 0);
+
+    // The same enrollment cannot be activated a second time.
+    await assert.rejects(
+      activateEnrollment({
+        contextUserId: owner.userId,
+        userId: owner.userId,
+        enrollmentId: owner.enrollmentId,
+        timeStep: currentStep + 1,
+      }),
+      (error) => error.code === "P0002",
+    );
+
+    // An expired enrollment must not create an active MFA configuration.
+    const expired = await createActivationFixture({ expired: true });
+    fixtures.push(expired);
+
+    await assert.rejects(
+      activateEnrollment({
+        contextUserId: expired.userId,
+        userId: expired.userId,
+        enrollmentId: expired.enrollmentId,
+        timeStep: currentStep,
+      }),
+      (error) => error.code === "P0002",
+    );
+
+    const expiredMfa = await migrator.query(
+      "SELECT id FROM user_mfa WHERE user_id = $1",
+      [expired.userId],
+    );
+    assert.equal(expiredMfa.rowCount, 0);
+
+    const expiredEnrollment = await migrator.query(
+      "SELECT id FROM mfa_enrollments WHERE id = $1",
+      [expired.enrollmentId],
+    );
+    assert.equal(expiredEnrollment.rowCount, 1);
+  } finally {
+    for (const fixture of fixtures) {
+      await migrator.query(
+        "DELETE FROM mfa_enrollments WHERE user_id = $1",
+        [fixture.userId],
+      );
+      await migrator.query(
+        "DELETE FROM user_mfa WHERE user_id = $1",
+        [fixture.userId],
+      );
+      await migrator.query(
+        "DELETE FROM users WHERE id = $1",
+        [fixture.userId],
+      );
+    }
+  }
+});
+
+
+test("MFA enrollment start authenticates, replaces pending secrets safely, and enforces protections", async () => {
+  // Establish one MFA-verified session. Reuse it throughout this test:
+  // the fixture's TOTP replay protection intentionally prevents reuse.
+  const challengeToken = await createChallenge();
+  const code = mfaCrypto.generateTotpCode(
+    secret,
+    Math.floor(Date.now() / 30000) + 1,
+  );
+
+  const verification = await verify(challengeToken, code);
+  assert.equal(verification.status, 200);
+
+  const verificationBody = await verification.json();
+  const sessionToken = getCookie(verification);
+  const csrfToken = verificationBody.csrfToken;
+
+  assert.match(csrfToken, /^[a-f0-9]{64}$/);
+
+  const enrollmentRequest = (body, csrf = csrfToken, origin = frontendOrigin) =>
+    fetch(`${apiBaseUrl}/api/v1/auth/mfa/enrollment`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: origin,
+        Cookie: cookieHeader(sessionToken),
+        ...(csrf ? { "x-csrf-token": csrf } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+
+  const activeBefore = await migrator.query(
+    `SELECT encrypted_secret, status, enabled_at
+     FROM user_mfa
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  assert.equal(activeBefore.rowCount, 1);
+  assert.equal(activeBefore.rows[0].status, "ENABLED");
+
+  // 1. Successful enrollment start.
+  const firstResponse = await enrollmentRequest({ password });
+  assert.equal(firstResponse.status, 200);
+  assert.equal(firstResponse.headers.get("cache-control"), "no-store");
+
+  const firstBody = await firstResponse.json();
+  assert.equal(typeof firstBody.provisioningUri, "string");
+  assert.ok(firstBody.expiresAt);
+
+  const firstUri = new URL(firstBody.provisioningUri);
+  assert.equal(firstUri.protocol, "otpauth:");
+  assert.equal(firstUri.searchParams.get("issuer"), "ServiceFlow");
+  assert.ok(firstUri.searchParams.get("secret"));
+
+  const firstLabel = decodeURIComponent(firstUri.pathname.slice(1));
+  assert.equal(firstLabel, `ServiceFlow:${email}`);
+
+  const firstEnrollment = await migrator.query(
+    `SELECT id, encrypted_secret, expires_at
+     FROM mfa_enrollments
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  assert.equal(firstEnrollment.rowCount, 1);
+  assert.ok(firstEnrollment.rows[0].expires_at.getTime() > Date.now());
+  assert.ok(
+    firstEnrollment.rows[0].expires_at.getTime() <= Date.now() + 11 * 60 * 1000,
+  );
+
+  const firstEnrollmentId = firstEnrollment.rows[0].id;
+  const firstEncryptedSecret =
+    firstEnrollment.rows[0].encrypted_secret.toString("hex");
+
+  assert.notEqual(
+    firstEncryptedSecret,
+    activeBefore.rows[0].encrypted_secret.toString("hex"),
+  );
+
+  // 2. Starting again replaces the pending secret, not active MFA.
+  const secondResponse = await enrollmentRequest({ password });
+  assert.equal(secondResponse.status, 200);
+  assert.equal(secondResponse.headers.get("cache-control"), "no-store");
+
+  const secondEnrollment = await migrator.query(
+    `SELECT id, encrypted_secret, expires_at
+     FROM mfa_enrollments
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  assert.equal(secondEnrollment.rowCount, 1);
+  assert.equal(secondEnrollment.rows[0].id, firstEnrollmentId);
+  assert.notEqual(
+    secondEnrollment.rows[0].encrypted_secret.toString("hex"),
+    firstEncryptedSecret,
+  );
+
+  const activeAfterReplacement = await migrator.query(
+    `SELECT encrypted_secret, status, enabled_at
+     FROM user_mfa
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  assert.equal(activeAfterReplacement.rows[0].status, "ENABLED");
+  assert.equal(
+    activeAfterReplacement.rows[0].encrypted_secret.toString("hex"),
+    activeBefore.rows[0].encrypted_secret.toString("hex"),
+  );
+  assert.equal(
+    activeAfterReplacement.rows[0].enabled_at.getTime(),
+    activeBefore.rows[0].enabled_at.getTime(),
+  );
+
+  // 3. Missing CSRF token must not start or replace an enrollment.
+  const beforeCsrf = secondEnrollment.rows[0].encrypted_secret.toString("hex");
+  const csrfResponse = await enrollmentRequest({ password }, null);
+
+  assert.notEqual(csrfResponse.status, 200);
+
+  const afterCsrf = await migrator.query(
+    `SELECT encrypted_secret
+     FROM mfa_enrollments
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  assert.equal(
+    afterCsrf.rows[0].encrypted_secret.toString("hex"),
+    beforeCsrf,
+  );
+
+  // 4. Wrong password must fail and leave the pending enrollment unchanged.
+  const wrongPasswordResponse = await enrollmentRequest({
+    password: "definitely-the-wrong-password",
+  });
+
+  assert.equal(wrongPasswordResponse.status, 401);
+
+  const afterWrongPassword = await migrator.query(
+    `SELECT encrypted_secret
+     FROM mfa_enrollments
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  assert.equal(
+    afterWrongPassword.rows[0].encrypted_secret.toString("hex"),
+    beforeCsrf,
+  );
+
+  const failureAudit = await migrator.query(
+    `SELECT count(*)::int AS total
+     FROM audit_events
+     WHERE actor_user_id = $1
+       AND action = 'auth.mfa.enrollment_failed'
+       AND outcome = 'FAILURE'`,
+    [userId],
+  );
+
+  assert.equal(failureAudit.rows[0].total, 1);
+
+  // 5. User-level rate limit must block before the service changes state.
+  blockedRateLimit = {
+    operation: "mfa-enrollment-start",
+    dimension: "user",
+  };
+
+  try {
+    const rateLimitedResponse = await enrollmentRequest({ password });
+    assert.equal(rateLimitedResponse.status, 429);
+    assert.equal(rateLimitedResponse.headers.get("retry-after"), "42");
+  } finally {
+    blockedRateLimit = null;
+  }
+
+  const afterRateLimit = await migrator.query(
+    `SELECT encrypted_secret
+     FROM mfa_enrollments
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  assert.equal(
+    afterRateLimit.rows[0].encrypted_secret.toString("hex"),
+    beforeCsrf,
+  );
+
+  // Verify both successful starts were audited.
+  const successAudit = await migrator.query(
+    `SELECT count(*)::int AS total
+     FROM audit_events
+     WHERE actor_user_id = $1
+       AND action = 'auth.mfa.enrollment_started'
+       AND outcome = 'SUCCESS'`,
+    [userId],
+  );
+
+  assert.equal(successAudit.rows[0].total, 2);
+});
+
+
+test("MFA authenticator replacement requires both factors and invalidates the old session", async () => {
+  // Authenticate with the currently enabled authenticator.
+  // Isolate this test from replay-counter state left by earlier tests.
+  await migrator.query(
+    `UPDATE user_mfa
+     SET last_accepted_time_step = NULL
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  const challengeToken = await createChallenge();
+  const loginStep = Math.floor(Date.now() / 30000) + 1;
+  const loginCode = mfaCrypto.generateTotpCode(secret, loginStep);
+
+  const verification = await verify(challengeToken, loginCode);
+  assert.equal(verification.status, 200);
+
+  const verificationBody = await verification.json();
+  const sessionToken = getCookie(verification);
+  const csrfToken = verificationBody.csrfToken;
+
+  const headers = {
+    "Content-Type": "application/json",
+    Origin: frontendOrigin,
+    Cookie: cookieHeader(sessionToken),
+    "x-csrf-token": csrfToken,
+  };
+
+  // Start a replacement enrollment.
+  const startResponse = await fetch(
+    `${apiBaseUrl}/api/v1/auth/mfa/enrollment`,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ password }),
+    },
+  );
+
+  assert.equal(startResponse.status, 200);
+  const startBody = await startResponse.json();
+
+  const provisioningUri = new URL(startBody.provisioningUri);
+  const encodedSecret = provisioningUri.searchParams.get("secret");
+  assert.ok(encodedSecret);
+
+  // Decode the Base32 secret from the provisioning URI.
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const pendingBytes = [];
+  let accumulator = 0;
+  let bitCount = 0;
+
+  for (const character of encodedSecret.toUpperCase()) {
+    const value = alphabet.indexOf(character);
+    assert.notEqual(value, -1, "Provisioning secret must be valid Base32.");
+
+    accumulator = (accumulator << 5) | value;
+    bitCount += 5;
+
+    if (bitCount >= 8) {
+      bitCount -= 8;
+      pendingBytes.push((accumulator >> bitCount) & 0xff);
+    }
+  }
+
+  const pendingSecret = Buffer.from(pendingBytes);
+
+  // Capture the current authenticator before attempting replacement.
+  const activeBefore = await migrator.query(
+    `SELECT encrypted_secret, status, enabled_at, last_accepted_time_step
+     FROM user_mfa
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  assert.equal(activeBefore.rowCount, 1);
+  assert.equal(activeBefore.rows[0].status, "ENABLED");
+
+  // Reset only this integration fixture's replay counter so the test
+  // can use a fresh current-factor code without waiting for a time step.
+  await migrator.query(
+    `UPDATE user_mfa
+     SET last_accepted_time_step = NULL
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  const timeStep = Math.floor(Date.now() / 30000) + 1;
+  const currentCode = mfaCrypto.generateTotpCode(secret, timeStep);
+  const pendingCode = mfaCrypto.generateTotpCode(pendingSecret, timeStep);
+
+  const confirm = (body) =>
+    fetch(`${apiBaseUrl}/api/v1/auth/mfa/enrollment/confirm`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+  // 1. Replacing an active authenticator requires the existing factor.
+  const missingCurrentFactor = await confirm({
+    password,
+    pendingCode,
+  });
+
+  assert.equal(missingCurrentFactor.status, 401);
+
+  // 2. A valid old factor cannot compensate for an invalid pending factor.
+  let invalidPendingCode = "000000";
+  while (
+    mfaCrypto.verifyTotpCode(
+      pendingSecret,
+      invalidPendingCode,
+      Date.now(),
+    ) !== null
+  ) {
+    invalidPendingCode = String(
+      (Number(invalidPendingCode) + 1) % 1000000,
+    ).padStart(6, "0");
+  }
+
+  const invalidConfirmation = await confirm({
+    password,
+    currentCode,
+    pendingCode: invalidPendingCode,
+  });
+
+  assert.equal(invalidConfirmation.status, 401);
+
+  const afterInvalidConfirmation = await migrator.query(
+    `SELECT encrypted_secret, status, enabled_at, last_accepted_time_step
+     FROM user_mfa
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  assert.equal(afterInvalidConfirmation.rows[0].status, "ENABLED");
+  assert.equal(
+    afterInvalidConfirmation.rows[0].encrypted_secret.toString("hex"),
+    activeBefore.rows[0].encrypted_secret.toString("hex"),
+  );
+  assert.equal(
+    afterInvalidConfirmation.rows[0].enabled_at.getTime(),
+    activeBefore.rows[0].enabled_at.getTime(),
+  );
+  assert.equal(
+    afterInvalidConfirmation.rows[0].last_accepted_time_step,
+    null,
+  );
+
+  const pendingAfterFailure = await migrator.query(
+    `SELECT id FROM mfa_enrollments WHERE user_id = $1`,
+    [userId],
+  );
+
+  assert.equal(pendingAfterFailure.rowCount, 1);
+
+  // 3. Both valid factors activate the replacement.
+  const confirmation = await confirm({
+    password,
+    currentCode,
+    pendingCode,
+  });
+
+  assert.equal(confirmation.status, 200);
+  assert.equal(confirmation.headers.get("cache-control"), "no-store");
+
+  const confirmationBody = await confirmation.json();
+  assert.equal(confirmationBody.replaced, true);
+  assert.ok(confirmationBody.enabledAt);
+
+  // 4. The pending enrollment is consumed.
+  const pendingAfterSuccess = await migrator.query(
+    `SELECT id FROM mfa_enrollments WHERE user_id = $1`,
+    [userId],
+  );
+
+  assert.equal(pendingAfterSuccess.rowCount, 0);
+
+  // 5. The active secret is now the replacement secret.
+  const activeAfterSuccess = await migrator.query(
+    `SELECT encrypted_secret, status, enabled_at, last_accepted_time_step
+     FROM user_mfa
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  assert.equal(activeAfterSuccess.rowCount, 1);
+  assert.equal(activeAfterSuccess.rows[0].status, "ENABLED");
+  assert.ok(
+    mfaCrypto
+      .decryptSecret(activeAfterSuccess.rows[0].encrypted_secret)
+      .equals(pendingSecret),
+  );
+  assert.ok(
+    activeAfterSuccess.rows[0].enabled_at.getTime() >=
+      new Date(confirmationBody.enabledAt).getTime() - 1,
+  );
+  assert.equal(
+    activeAfterSuccess.rows[0].last_accepted_time_step.toString(),
+    String(timeStep),
+  );
+
+  // 6. Successful replacement must have an audit record.
+  const replacementAudit = await migrator.query(
+    `SELECT count(*)::int AS total
+     FROM audit_events
+     WHERE actor_user_id = $1
+       AND action = 'auth.mfa.authenticator_replaced'
+       AND outcome = 'SUCCESS'`,
+    [userId],
+  );
+
+  assert.equal(replacementAudit.rows[0].total, 1);
+
+  // 7. The previous MFA-verified session predates the new enabled_at.
+  const oldSessionResponse = await fetch(
+    `${apiBaseUrl}/api/v1/auth/me`,
+    {
+      method: "GET",
+      headers: {
+        Origin: frontendOrigin,
+        Cookie: cookieHeader(sessionToken),
+      },
+    },
+  );
+
+  assert.equal(oldSessionResponse.status, 401);
+});
+
+
+test("Recovery-code regeneration requires fresh authentication and atomically replaces the batch", async () => {
+  // This test follows authenticator replacement. Reset only the test
+  // fixture's replay counter so this test can establish a fresh session.
+  await migrator.query(
+    `UPDATE user_mfa
+     SET last_accepted_time_step = NULL
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  const activeResult = await migrator.query(
+    `SELECT encrypted_secret
+     FROM user_mfa
+     WHERE user_id = $1 AND status = 'ENABLED'`,
+    [userId],
+  );
+  assert.equal(activeResult.rowCount, 1);
+
+  const activeSecret = mfaCrypto.decryptSecret(
+    Buffer.from(activeResult.rows[0].encrypted_secret),
+  );
+
+  // Establish a fresh MFA-verified session.
+  const loginStep = Math.floor(Date.now() / 30000);
+  const challengeToken = await createChallenge();
+  const verification = await verify(
+    challengeToken,
+    mfaCrypto.generateTotpCode(activeSecret, loginStep),
+  );
+  assert.equal(verification.status, 200);
+
+  const verificationBody = await verification.json();
+  const sessionToken = getCookie(verification);
+  const csrfToken = verificationBody.csrfToken;
+  assert.match(csrfToken, /^[a-f0-9]{64}$/);
+
+  const regenerationStep = loginStep + 1;
+  const currentCode = mfaCrypto.generateTotpCode(
+    activeSecret,
+    regenerationStep,
+  );
+
+  const regenerationRequest = (body, csrf = csrfToken) =>
+    fetch(
+      `${apiBaseUrl}/api/v1/auth/mfa/recovery-codes/regenerate`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: frontendOrigin,
+          Cookie: cookieHeader(sessionToken),
+          ...(csrf ? { "x-csrf-token": csrf } : {}),
+        },
+        body: JSON.stringify(body),
+      },
+    );
+
+  // Insert a known old code to verify batch invalidation.
+  const oldRecoveryCode = mfaCrypto.generateRecoveryCode();
+  const oldRecoveryHash = mfaCrypto.hashRecoveryCode(oldRecoveryCode);
+
+  await migrator.query(
+    `INSERT INTO mfa_recovery_codes (id, user_id, code_hash)
+     VALUES ($1, $2, $3)`,
+    [randomUUID(), userId, oldRecoveryHash],
+  );
+
+  // Missing CSRF must not change the recovery-code batch.
+  const csrfFailure = await regenerationRequest(
+    { password, currentCode },
+    null,
+  );
+  assert.equal(csrfFailure.status, 403);
+
+  const oldCodeBefore = await migrator.query(
+    `SELECT consumed_at
+     FROM mfa_recovery_codes
+     WHERE user_id = $1 AND code_hash = $2`,
+    [userId, oldRecoveryHash],
+  );
+  assert.equal(oldCodeBefore.rowCount, 1);
+  assert.equal(oldCodeBefore.rows[0].consumed_at, null);
+
+  // Incorrect password must not consume the TOTP step or old codes.
+  const passwordFailure = await regenerationRequest({
+    password: "incorrect-password",
+    currentCode,
+  });
+  assert.equal(passwordFailure.status, 401);
+
+  // Find a definitely invalid six-digit code.
+  let invalidCode = "000000";
+  while (
+    mfaCrypto.verifyTotpCode(
+      activeSecret,
+      invalidCode,
+      Date.now(),
+    ) !== null
+  ) {
+    invalidCode = String(
+      (Number(invalidCode) + 1) % 1000000,
+    ).padStart(6, "0");
+  }
+
+  const factorFailure = await regenerationRequest({
+    password,
+    currentCode: invalidCode,
+  });
+  assert.equal(factorFailure.status, 401);
+
+  const oldCodeAfterFailures = await migrator.query(
+    `SELECT consumed_at
+     FROM mfa_recovery_codes
+     WHERE user_id = $1 AND code_hash = $2`,
+    [userId, oldRecoveryHash],
+  );
+  assert.equal(oldCodeAfterFailures.rows[0].consumed_at, null);
+
+  // A valid password and fresh TOTP atomically replace the entire batch.
+  const success = await regenerationRequest({
+    password,
+    currentCode,
+  });
+  assert.equal(success.status, 200);
+  assert.equal(success.headers.get("cache-control"), "no-store");
+
+  const body = await success.json();
+  assert.equal(body.recoveryCodes.length, 10);
+  assert.ok(body.regeneratedAt);
+
+  for (const code of body.recoveryCodes) {
+    assert.match(code, /^[A-F0-9]{8}(-[A-F0-9]{8}){3}$/);
+  }
+
+  const oldCodeAfterSuccess = await migrator.query(
+    `SELECT consumed_at
+     FROM mfa_recovery_codes
+     WHERE user_id = $1 AND code_hash = $2`,
+    [userId, oldRecoveryHash],
+  );
+  assert.ok(oldCodeAfterSuccess.rows[0].consumed_at);
+
+  const activeCodes = await migrator.query(
+    `SELECT code_hash, consumed_at
+     FROM mfa_recovery_codes
+     WHERE user_id = $1 AND consumed_at IS NULL`,
+    [userId],
+  );
+  assert.equal(activeCodes.rowCount, 10);
+
+  const expectedHashes = new Set(
+    body.recoveryCodes.map((code) => mfaCrypto.hashRecoveryCode(code)),
+  );
+  const storedHashes = new Set(
+    activeCodes.rows.map((row) => row.code_hash.trim()),
+  );
+  assert.deepEqual(storedHashes, expectedHashes);
+  assert.equal(
+    activeCodes.rows.filter((row) => row.consumed_at === null).length,
+    10,
+  );
+
+  // Reusing the same TOTP time step must fail.
+  const replayFailure = await regenerationRequest({
+    password,
+    currentCode,
+  });
+  assert.equal(replayFailure.status, 401);
+
+  // The previous batch's code must no longer authenticate.
+  const oldCodeChallenge = await createChallenge();
+  const oldCodeLogin = await verify(
+    oldCodeChallenge,
+    oldRecoveryCode,
+  );
+  assert.equal(oldCodeLogin.status, 401);
+  assert.equal(oldCodeLogin.headers.get("set-cookie"), null);
+
+  // A newly issued recovery code works once, then cannot be reused.
+  const newCode = body.recoveryCodes[0];
+  const newCodeChallenge = await createChallenge();
+  const newCodeLogin = await verify(newCodeChallenge, newCode);
+  assert.equal(newCodeLogin.status, 200);
+  assert.ok(getCookie(newCodeLogin));
+
+  const reuseChallenge = await createChallenge();
+  const reuseResponse = await verify(reuseChallenge, newCode);
+  assert.equal(reuseResponse.status, 401);
+  assert.equal(reuseResponse.headers.get("set-cookie"), null);
+
+  const audit = await migrator.query(
+    `SELECT action, outcome, count(*)::int AS total
+     FROM audit_events
+     WHERE actor_user_id = $1
+       AND action IN (
+         'auth.mfa.recovery_codes_regenerated',
+         'auth.mfa.recovery_codes_regeneration_failed'
+       )
+     GROUP BY action, outcome`,
+    [userId],
+  );
+
+  const successfulAudits = audit.rows.filter(
+    (row) =>
+      row.action === "auth.mfa.recovery_codes_regenerated" &&
+      row.outcome === "SUCCESS",
+  );
+  assert.equal(successfulAudits.length, 1);
+  assert.equal(successfulAudits[0].total, 1);
+
+  const failedAudits = audit.rows.filter(
+    (row) =>
+      row.action === "auth.mfa.recovery_codes_regeneration_failed" &&
+      row.outcome === "FAILURE",
+  );
+  assert.ok(failedAudits.length >= 1);
+  assert.ok(
+    failedAudits.reduce((sum, row) => sum + row.total, 0) >= 3,
+  );
+});
+
+
+test("MFA disable requires fresh authentication and atomically revokes MFA credentials and sessions", async () => {
+  // Isolate this final lifecycle test from replay-counter state left by
+  // earlier tests, including authenticator replacement and recovery rotation.
+  const activeResult = await migrator.query(
+    `SELECT encrypted_secret
+     FROM user_mfa
+     WHERE user_id = $1 AND status = 'ENABLED'`,
+    [userId],
+  );
+  assert.equal(activeResult.rowCount, 1);
+
+  const activeSecret = mfaCrypto.decryptSecret(
+    Buffer.from(activeResult.rows[0].encrypted_secret),
+  );
+
+  await migrator.query(
+    `UPDATE user_mfa
+     SET last_accepted_time_step = NULL
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  // Use the previous TOTP step for login and the current step for disable.
+  // This gives the test a fresh, strictly increasing factor without sleeping.
+  const baseStep = Math.floor(Date.now() / 30000);
+  const loginStep = baseStep - 1;
+  const disableStep = baseStep;
+
+  const loginResponse = await login();
+  assert.equal(loginResponse.status, 200);
+  const loginBody = await loginResponse.json();
+  assert.equal(loginBody.mfaRequired, true);
+
+  const verification = await verify(
+    loginBody.challengeToken,
+    mfaCrypto.generateTotpCode(activeSecret, loginStep),
+  );
+  assert.equal(verification.status, 200);
+
+  const verificationBody = await verification.json();
+  const sessionToken = getCookie(verification);
+  const csrfToken = verificationBody.csrfToken;
+  assert.match(csrfToken, /^[a-f0-9]{64}$/);
+
+  const currentCode = mfaCrypto.generateTotpCode(
+    activeSecret,
+    disableStep,
+  );
+
+  const disableRequest = (body, csrf = csrfToken) =>
+    fetch(`${apiBaseUrl}/api/v1/auth/mfa/disable`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: frontendOrigin,
+        Cookie: cookieHeader(sessionToken),
+        ...(csrf ? { "x-csrf-token": csrf } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+
+  // Seed all outstanding credentials that successful disable must invalidate.
+  const oldRecoveryCode = mfaCrypto.generateRecoveryCode();
+  const oldRecoveryHash = mfaCrypto.hashRecoveryCode(oldRecoveryCode);
+  const pendingSecret = mfaCrypto.generateTotpSecret();
+  const pendingEnrollmentId = randomUUID();
+  const outstandingChallengeHash = hashToken(randomUUID());
+
+  await migrator.query(
+    `INSERT INTO mfa_recovery_codes (id, user_id, code_hash)
+     VALUES ($1, $2, $3)`,
+    [randomUUID(), userId, oldRecoveryHash],
+  );
+
+  await migrator.query(
+    `INSERT INTO mfa_enrollments (
+       id, user_id, encrypted_secret, expires_at, updated_at
+     )
+     VALUES ($1, $2, $3, NOW() + INTERVAL '10 minutes', NOW())`,
+    [
+      pendingEnrollmentId,
+      userId,
+      mfaCrypto.encryptSecret(pendingSecret),
+    ],
+  );
+
+  await migrator.query(
+    `INSERT INTO mfa_challenges (id, user_id, token_hash, expires_at)
+     VALUES ($1, $2, $3, NOW() + INTERVAL '5 minutes')`,
+    [randomUUID(), userId, outstandingChallengeHash],
+  );
+
+  const sessionBefore = await migrator.query(
+    `SELECT id, revoked_at
+     FROM auth_sessions
+     WHERE user_id = $1 AND session_hash = $2`,
+    [userId, hashToken(sessionToken)],
+  );
+  assert.equal(sessionBefore.rowCount, 1);
+  assert.equal(sessionBefore.rows[0].revoked_at, null);
+
+  // 1. Missing CSRF must not change any lifecycle state.
+  const csrfFailure = await disableRequest(
+    { password, currentCode },
+    null,
+  );
+  assert.equal(csrfFailure.status, 403);
+
+  // 2. Wrong password must not consume the valid TOTP step.
+  const passwordFailure = await disableRequest({
+    password: "incorrect-password",
+    currentCode,
+  });
+  assert.equal(passwordFailure.status, 401);
+
+  // 3. A valid password cannot compensate for an invalid factor.
+  let invalidCode = "000000";
+  while (
+    mfaCrypto.verifyTotpCode(
+      activeSecret,
+      invalidCode,
+      Date.now(),
+    ) !== null
+  ) {
+    invalidCode = String(
+      (Number(invalidCode) + 1) % 1000000,
+    ).padStart(6, "0");
+  }
+
+  const factorFailure = await disableRequest({
+    password,
+    currentCode: invalidCode,
+  });
+  assert.equal(factorFailure.status, 401);
+
+  const stateAfterFailures = await migrator.query(
+    `SELECT
+       m.status,
+       m.enabled_at,
+       m.last_accepted_time_step,
+       s.revoked_at,
+       r.consumed_at AS recovery_consumed_at,
+       e.id AS enrollment_id,
+       c.consumed_at AS challenge_consumed_at
+     FROM user_mfa m
+     JOIN auth_sessions s
+       ON s.user_id = m.user_id AND s.session_hash = $2
+     JOIN mfa_recovery_codes r
+       ON r.user_id = m.user_id AND r.code_hash = $3
+     JOIN mfa_enrollments e
+       ON e.user_id = m.user_id
+     JOIN mfa_challenges c
+       ON c.user_id = m.user_id AND c.token_hash = $4
+     WHERE m.user_id = $1`,
+    [
+      userId,
+      hashToken(sessionToken),
+      oldRecoveryHash,
+      outstandingChallengeHash,
+    ],
+  );
+
+  assert.equal(stateAfterFailures.rowCount, 1);
+  assert.equal(stateAfterFailures.rows[0].status, "ENABLED");
+  assert.ok(stateAfterFailures.rows[0].enabled_at);
+  assert.equal(
+    stateAfterFailures.rows[0].last_accepted_time_step,
+    String(loginStep),
+  );
+  assert.equal(stateAfterFailures.rows[0].revoked_at, null);
+  assert.equal(stateAfterFailures.rows[0].recovery_consumed_at, null);
+  assert.equal(
+    stateAfterFailures.rows[0].enrollment_id,
+    pendingEnrollmentId,
+  );
+  assert.equal(
+    stateAfterFailures.rows[0].challenge_consumed_at,
+    null,
+  );
+
+  // 4. A fresh password + TOTP disables MFA and invalidates every session.
+  const success = await disableRequest({ password, currentCode });
+  assert.equal(success.status, 200);
+  assert.equal(success.headers.get("cache-control"), "no-store");
+
+  const clearCookie = success.headers.get("set-cookie");
+  assert.ok(clearCookie);
+  assert.match(clearCookie, /Max-Age=0/i);
+
+  const successBody = await success.json();
+  assert.equal(successBody.message, "MFA disabled. Sign in again.");
+  assert.ok(successBody.disabledAt);
+  assert.ok(successBody.revokedSessions >= 1);
+
+  const disabledMfa = await migrator.query(
+    `SELECT status, enabled_at, last_accepted_time_step
+     FROM user_mfa
+     WHERE user_id = $1`,
+    [userId],
+  );
+  assert.equal(disabledMfa.rowCount, 1);
+  assert.equal(disabledMfa.rows[0].status, "DISABLED");
+  assert.equal(disabledMfa.rows[0].enabled_at, null);
+  assert.equal(disabledMfa.rows[0].last_accepted_time_step, null);
+
+  const revokedSession = await migrator.query(
+    `SELECT revoked_at
+     FROM auth_sessions
+     WHERE user_id = $1 AND session_hash = $2`,
+    [userId, hashToken(sessionToken)],
+  );
+  assert.equal(revokedSession.rowCount, 1);
+  assert.ok(revokedSession.rows[0].revoked_at);
+
+  const invalidatedCredentials = await migrator.query(
+    `SELECT
+       (SELECT consumed_at FROM mfa_recovery_codes
+        WHERE user_id = $1 AND code_hash = $2) AS recovery_consumed_at,
+       (SELECT id FROM mfa_enrollments
+        WHERE user_id = $1) AS enrollment_id,
+       (SELECT consumed_at FROM mfa_challenges
+        WHERE user_id = $1 AND token_hash = $3) AS challenge_consumed_at`,
+    [userId, oldRecoveryHash, outstandingChallengeHash],
+  );
+
+  assert.equal(invalidatedCredentials.rowCount, 1);
+  assert.ok(invalidatedCredentials.rows[0].recovery_consumed_at);
+  assert.equal(invalidatedCredentials.rows[0].enrollment_id, null);
+  assert.ok(invalidatedCredentials.rows[0].challenge_consumed_at);
+
+  // The old browser session must no longer authenticate.
+  const oldSessionResponse = await fetch(
+    `${apiBaseUrl}/api/v1/auth/me`,
+    {
+      headers: {
+        Origin: frontendOrigin,
+        Cookie: cookieHeader(sessionToken),
+      },
+    },
+  );
+  assert.equal(oldSessionResponse.status, 401);
+
+  const audit = await migrator.query(
+    `SELECT action, outcome, count(*)::int AS total
+     FROM audit_events
+     WHERE actor_user_id = $1
+       AND action IN (
+         'auth.mfa.disable_failed',
+         'auth.mfa.disabled'
+       )
+     GROUP BY action, outcome`,
+    [userId],
+  );
+
+  const successAudits = audit.rows.filter(
+    (row) =>
+      row.action === "auth.mfa.disabled" &&
+      row.outcome === "SUCCESS",
+  );
+  assert.equal(successAudits.length, 1);
+  assert.equal(successAudits[0].total, 1);
+
+  const failureAudits = audit.rows.filter(
+    (row) =>
+      row.action === "auth.mfa.disable_failed" &&
+      row.outcome === "FAILURE",
+  );
+  assert.ok(
+    failureAudits.reduce((sum, row) => sum + row.total, 0) >= 2,
+  );
+});
+
+async function createActivationFixture({ expired = false } = {}) {
+  const id = randomUUID();
+  const enrollmentId = randomUUID();
+  const emailAddress = `${id}@example.invalid`;
+  const secretValue = mfaCrypto.generateTotpSecret();
+  const encryptedSecret = mfaCrypto.encryptSecret(secretValue);
+  const passwordHash = await passwords.hashPassword(password);
+
+  await migrator.query(
+    `INSERT INTO users (
+       id, email_normalized, password_hash,
+       email_verified_at, status, updated_at
+     )
+     VALUES ($1, $2, $3, NOW(), 'ACTIVE', NOW())`,
+    [id, emailAddress, passwordHash],
+  );
+
+  if (expired) {
+    await migrator.query(
+      `INSERT INTO mfa_enrollments (
+         id, user_id, encrypted_secret,
+         created_at, expires_at, updated_at
+       )
+       VALUES (
+         $1, $2, $3,
+         NOW() - INTERVAL '2 minutes',
+         NOW() - INTERVAL '1 minute',
+         NOW()
+       )`,
+      [enrollmentId, id, encryptedSecret],
+    );
+  } else {
+    await migrator.query(
+      `INSERT INTO mfa_enrollments (
+         id, user_id, encrypted_secret,
+         expires_at, updated_at
+       )
+       VALUES ($1, $2, $3, NOW() + INTERVAL '10 minutes', NOW())`,
+      [enrollmentId, id, encryptedSecret],
+    );
+  }
+
+  return {
+    userId: id,
+    enrollmentId,
+    encryptedSecret,
+  };
+}
+
+async function activateEnrollment({
+  contextUserId,
+  userId,
+  enrollmentId,
+  timeStep,
+}) {
+  await appClient.query("BEGIN");
+
+  try {
+    await appClient.query(
+      `SELECT
+         set_config('app.user_id', $1, true),
+         set_config('app.tenant_id', '', true)`,
+      [contextUserId],
+    );
+
+    const result = await appClient.query(
+      `SELECT public.activate_mfa_enrollment(
+         $1::uuid,
+         $2::uuid,
+         $3::bigint
+       ) AS enabled_at`,
+      [userId, enrollmentId, timeStep],
+    );
+
+    await appClient.query("COMMIT");
+    return result.rows[0].enabled_at;
+  } catch (error) {
+    await appClient.query("ROLLBACK");
+    throw error;
+  }
+}

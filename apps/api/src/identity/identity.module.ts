@@ -10,6 +10,7 @@ import { EmailDeliveryService } from "./email-delivery.service.js";
 import { MembershipService } from "./membership.service.js";
 import { MfaCryptoService } from "./mfa-crypto.service.js";
 import { MfaChallengeService } from "./mfa-challenge.service.js";
+import { MfaEnrollmentService } from "./mfa-enrollment.service.js";
 import { PasswordService } from "./password.service.js";
 import { SessionAuthGuard } from "./session-auth.guard.js";
 import { SessionService } from "./session.service.js";
@@ -24,6 +25,7 @@ import { SessionService } from "./session.service.js";
     MembershipService,
     MfaCryptoService,
     MfaChallengeService,
+    MfaEnrollmentService,
     PasswordService,
     SessionAuthGuard,
     SessionService,
@@ -35,6 +37,7 @@ import { SessionService } from "./session.service.js";
     MembershipService,
     MfaCryptoService,
     MfaChallengeService,
+    MfaEnrollmentService,
     PasswordService,
     SessionAuthGuard,
     SessionService,

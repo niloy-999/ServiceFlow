@@ -35,6 +35,7 @@ model User {
   platformAdminGrantsIssued  PlatformAdministrator[] @relation("PlatformAdminGrantor")
   platformAdminGrantsRevoked PlatformAdministrator[] @relation("PlatformAdminRevoker")
   mfa                        UserMfa?
+  mfaEnrollment              MfaEnrollment?
   mfaRecoveryCodes           MfaRecoveryCode[]
   mfaChallenges              MfaChallenge[]
   auditEvents                AuditEvent[]
@@ -251,6 +252,20 @@ model UserMfa {
   user User @relation(fields: [userId], references: [id], onDelete: Restrict)
 
   @@map("user_mfa")
+}
+
+model MfaEnrollment {
+  id              String   @id @default(uuid()) @db.Uuid
+  userId          String   @unique @map("user_id") @db.Uuid
+  encryptedSecret Bytes    @map("encrypted_secret") @db.ByteA
+  expiresAt       DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([expiresAt])
+  @@map("mfa_enrollments")
 }
 
 model MfaRecoveryCode {
