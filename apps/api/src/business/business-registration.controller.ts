@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Get,
   Post,
+  Param,
   Req,
   Res,
   UnauthorizedException,
@@ -60,6 +61,26 @@ export class BusinessRegistrationController {
     }
 
     return this.businessRegistrationService.register(request.authSession.userId, input.name);
+  }
+
+  @Post(":businessId/activate")
+  async activate(@Param("businessId") businessId: string, @Req() request: BusinessRequest) {
+    assertFrontendOrigin(request.headers.origin);
+    if (!request.authSession) throw new UnauthorizedException("Authentication is required.");
+    const sessionToken = readSessionCookie(request.headers.cookie);
+    const suppliedToken = request.headers["x-csrf-token"];
+    if (
+      !sessionToken ||
+      typeof suppliedToken !== "string" ||
+      !this.csrfService.verifyToken(sessionToken, suppliedToken)
+    ) {
+      throw new ForbiddenException("A valid CSRF token is required.");
+    }
+    return this.businessRegistrationService.activatePendingBusiness(
+      request.authSession.userId,
+      businessId,
+      request.authSession.mfaVerifiedAt,
+    );
   }
 
   @Get()

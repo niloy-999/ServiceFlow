@@ -25,6 +25,8 @@ From repository root, use `./scripts/pnpm.sh` so Corepack selects the repository
 
 Identity integration coverage includes registration and email verification, password reset expiry/single-use/session revocation, session lifecycle, MFA challenges/recovery, rate limits, and tenant RLS. Password reset assertions verify that only token hashes are persisted and that invalid or consumed links have generic responses.
 
+Phase 2 adds PostgreSQL-backed platform activation and RBAC/branch-scope tests. Activation must cover pending-state rejection, active platform authority plus MFA, single initial owner and branch, atomic audit, and replay/concurrent requests. Authorization tests must cover known permission identifiers, active business/member state, cross-tenant branches, business-wide vs branch visibility, and view vs operation scope. Inventory, receiving, returns and transfer mutations require real PostgreSQL concurrency, idempotency, ledger/projection and audit tests; do not simulate these invariants with SQLite or in-memory mocks alone.
+
 The root `ci:check` aggregates formatting, typechecking, unit tests, and builds. It does not imply PostgreSQL integration tests passed. CI runs those separately against an ephemeral service.
 
 For a local PostgreSQL backup/restore drill, use the procedures in [operational readiness](../operations/operational-readiness.md). The drill must use an isolated source and newly generated restore database; never point it at production or reuse an existing target.
@@ -35,7 +37,8 @@ For a local PostgreSQL backup/restore drill, use the procedures in [operational 
 - Transaction-local user/tenant settings do not leak through pooled connections.
 - Registration, verification, login, logout, session expiry/revocation and rate limiting.
 - Origin and CSRF validation for state-changing requests.
-- Platform admin separation and enforced MFA.
+- Platform admin separation, activation authority and enforced MFA for platform and business owners/administrators.
+- Tenant permission checks and separate branch visibility/operation scopes.
 - MFA enrollment, challenge single consumption, recovery, disable, key rotation.
 - Append-only audit grants and transactional insertion.
 - Migration apply and status on a fresh isolated PostgreSQL database.

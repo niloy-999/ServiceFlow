@@ -9,6 +9,7 @@ import { Prisma } from "../generated/prisma/client.js";
 import { PrismaService } from "../database/prisma.service.js";
 import { GlobalIdentityContextService } from "../database/global-identity-context.service.js";
 import { hasActivePlatformAdministrator } from "./platform-admin-policy.js";
+import { hasActiveBusinessAdministratorRole } from "./business-admin-policy.js";
 import { EmailDeliveryService } from "./email-delivery.service.js";
 import { PasswordService } from "./password.service.js";
 import { SessionService, type CreatedSession } from "./session.service.js";
@@ -445,6 +446,7 @@ export class AuthService {
       }
 
       const isPlatformAdministrator = await hasActivePlatformAdministrator(tx, user.id);
+      const isBusinessAdministrator = await hasActiveBusinessAdministratorRole(tx, user.id);
 
       const mfa = await tx.userMfa.findUnique({
         where: { userId: user.id },
@@ -454,7 +456,7 @@ export class AuthService {
       const now = new Date();
 
       if (
-        isPlatformAdministrator &&
+        (isPlatformAdministrator || isBusinessAdministrator) &&
         (mfa?.status !== "ENABLED" || !mfa.enabledAt || mfa.enabledAt > now)
       ) {
         throw new UnauthorizedException("Invalid email or password.");

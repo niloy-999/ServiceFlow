@@ -15,6 +15,11 @@ enum BusinessStatus {
   CLOSED
 }
 
+enum BranchScopeType {
+  BUSINESS
+  BRANCH
+}
+
 model User {
   id              String    @id @default(uuid()) @db.Uuid
   emailNormalized String    @unique @map("email_normalized") @db.VarChar(320)
@@ -74,9 +79,11 @@ model TenantMembership {
   version   BigInt    @default(1)
 
   business Business @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  user     User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
 
   roleAssignments MembershipRole[]
+  branchScopes    MembershipBranchScope[]
 
   @@unique([tenantId, userId])
   @@unique([tenantId, id])
@@ -95,6 +102,8 @@ model Branch {
   version   BigInt   @default(1)
 
   business Business @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  membershipScopes MembershipBranchScope[]
 
   @@unique([tenantId, code])
   @@unique([tenantId, id])
@@ -153,12 +162,28 @@ model MembershipRole {
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
 
   membership TenantMembership @relation(fields: [tenantId, membershipId], references: [tenantId, id], onDelete: Restrict)
-
-  role Role @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Restrict)
+  role       Role             @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Restrict)
 
   @@id([tenantId, membershipId, roleId])
   @@index([tenantId, roleId])
   @@map("membership_roles")
+}
+
+model MembershipBranchScope {
+  id           String          @id @default(uuid()) @db.Uuid
+  tenantId     String          @map("tenant_id") @db.Uuid
+  membershipId String          @map("membership_id") @db.Uuid
+  scopeType    BranchScopeType @map("scope_type")
+  branchId     String?         @map("branch_id") @db.Uuid
+  canView      Boolean         @default(true) @map("can_view")
+  canOperate   Boolean         @default(false) @map("can_operate")
+  createdAt    DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  membership TenantMembership @relation(fields: [tenantId, membershipId], references: [tenantId, id], onDelete: Restrict)
+  branch     Branch?          @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: Restrict)
+
+  @@index([tenantId, membershipId])
+  @@map("membership_branch_scopes")
 }
 
 model AuthSession {

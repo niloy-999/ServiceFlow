@@ -11,6 +11,7 @@ import { Client } from "pg";
 import { AppModule } from "../dist/app.module.js";
 import { AuditService } from "../dist/audit/audit.service.js";
 import { PrismaService } from "../dist/database/prisma.service.js";
+import { GlobalIdentityContextService } from "../dist/database/global-identity-context.service.js";
 import { CsrfService } from "../dist/identity/csrf.service.js";
 import { SessionService } from "../dist/identity/session.service.js";
 
@@ -41,6 +42,8 @@ let csrf;
 let prisma;
 let auditService;
 let apiBaseUrl;
+let activatedBusinessId;
+let identityContext;
 
 function cookieHeader(token) {
   return `${sessionCookieName}=${token}`;
@@ -149,6 +152,7 @@ before(async () => {
 
   prisma = app.get(PrismaService);
   auditService = app.get(AuditService);
+  identityContext = app.get(GlobalIdentityContextService);
 
   const appIdentity = await prisma.$queryRaw`
     SELECT current_user AS role, current_database() AS database
@@ -179,6 +183,23 @@ after(async () => {
           ...new Set([...businessIds, ...ownedBusinesses.rows.map((row) => row.tenant_id)]),
         ];
 
+        await migrator.query(
+          "DELETE FROM membership_branch_scopes WHERE tenant_id = ANY($1::uuid[])",
+          [cleanupBusinessIds],
+        );
+        await migrator.query("DELETE FROM membership_roles WHERE tenant_id = ANY($1::uuid[])", [
+          cleanupBusinessIds,
+        ]);
+        await migrator.query("DELETE FROM role_permissions WHERE tenant_id = ANY($1::uuid[])", [
+          cleanupBusinessIds,
+        ]);
+        await migrator.query("DELETE FROM roles WHERE tenant_id = ANY($1::uuid[])", [
+          cleanupBusinessIds,
+        ]);
+        await migrator.query("DELETE FROM branches WHERE tenant_id = ANY($1::uuid[])", [
+          cleanupBusinessIds,
+        ]);
+
         // Test teardown only: temporarily disable immutability for fixture cleanup.
         await migrator.query("ALTER TABLE audit_events DISABLE TRIGGER audit_events_immutable");
 
@@ -200,6 +221,14 @@ after(async () => {
         }
 
         await migrator.query("DELETE FROM auth_sessions WHERE user_id = ANY($1::uuid[])", [
+          [users.applicant.id, users.other.id, users.unverified.id],
+        ]);
+
+        await migrator.query(
+          "DELETE FROM platform_administrators WHERE user_id = ANY($1::uuid[])",
+          [[users.applicant.id, users.other.id, users.unverified.id]],
+        );
+        await migrator.query("DELETE FROM user_mfa WHERE user_id = ANY($1::uuid[])", [
           [users.applicant.id, users.other.id, users.unverified.id],
         ]);
 
@@ -262,6 +291,7 @@ test("Verified users receive pending businesses and pending memberships", async 
   assert.equal(response.status, 201);
 
   const result = await response.json();
+  activatedBusinessId = result.business.id;
 
   assert.equal(result.membershipStatus, "PENDING");
   assert.equal(result.business.name, "Integration Test Business");
@@ -390,4 +420,103 @@ test("Global audit events require an empty tenant context", async () => {
       });
     }),
   );
+});
+
+test("Platform activation atomically provisions the initial owner workspace", async () => {
+  assert.ok(activatedBusinessId);
+  await migrator.query(
+    `INSERT INTO platform_administrators (id, user_id, role, status, updated_at)
+     VALUES ($1, $2, 'PLATFORM_ADMIN', 'ACTIVE', NOW())`,
+    [randomUUID(), users.other.id],
+  );
+  for (const userId of [users.other.id, users.applicant.id]) {
+    await migrator.query(
+      `INSERT INTO user_mfa (id, user_id, encrypted_secret, status, enabled_at, updated_at)
+       VALUES ($1, $2, $3, 'ENABLED', NOW() - INTERVAL '1 minute', NOW())`,
+      [randomUUID(), userId, Buffer.alloc(32, 7)],
+    );
+  }
+  const mfaFixtures = await migrator.query(
+    "SELECT bool_and(status = 'ENABLED' AND enabled_at < NOW()) AS ready FROM user_mfa WHERE user_id = ANY($1::uuid[])",
+    [[users.other.id, users.applicant.id]],
+  );
+  assert.equal(mfaFixtures.rows[0].ready, true);
+  const runtimeMfa = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT set_config('app.user_id', ${users.other.id}, true)`;
+    await tx.$queryRaw`SELECT set_config('app.tenant_id', '', true)`;
+    return tx.userMfa.findUnique({
+      where: { userId: users.other.id },
+      select: { status: true, enabledAt: true },
+    });
+  });
+  assert.equal(runtimeMfa?.status, "ENABLED");
+  assert.ok(runtimeMfa?.enabledAt && runtimeMfa.enabledAt.getTime() < Date.now());
+
+  const platformSession = await identityContext.withGlobalIdentityContext(
+    { userId: users.other.id },
+    (tx) => sessions.createMfaVerifiedSession(tx, users.other.id),
+  );
+  const platformCookie = cookieHeader(platformSession.token);
+  const csrfToken = csrf.generateToken(platformSession.token);
+  const activationUrl = `${apiBaseUrl}/api/v1/businesses/registrations/${activatedBusinessId}/activate`;
+  const memberSession = await identityContext.withGlobalIdentityContext(
+    { userId: users.applicant.id },
+    (tx) => sessions.createMfaVerifiedSession(tx, users.applicant.id),
+  );
+  const forbiddenActivation = await fetch(activationUrl, {
+    method: "POST",
+    headers: {
+      Origin: frontendOrigin,
+      Cookie: cookieHeader(memberSession.token),
+      "X-CSRF-Token": csrf.generateToken(memberSession.token),
+    },
+  });
+  assert.equal(forbiddenActivation.status, 403);
+  const activationRequests = await Promise.all(
+    Array.from({ length: 2 }, () =>
+      fetch(activationUrl, {
+        method: "POST",
+        headers: { Origin: frontendOrigin, Cookie: platformCookie, "X-CSRF-Token": csrfToken },
+      }),
+    ),
+  );
+  assert.deepEqual(activationRequests.map((response) => response.status).sort(), [201, 409]);
+  const activation = activationRequests.find((response) => response.status === 201);
+  assert.ok(activation);
+  const activationBody = await activation.json();
+  assert.equal(activation.status, 201, JSON.stringify(activationBody));
+  assert.equal(activationBody.status, "ACTIVE");
+  const ownerMemberships = await fetch(`${apiBaseUrl}/api/v1/auth/memberships`, {
+    headers: { Cookie: cookieHeader(memberSession.token) },
+  });
+  assert.equal(ownerMemberships.status, 200);
+  const discovered = await ownerMemberships.json();
+  assert.equal(discovered.memberships.length, 1);
+  assert.equal(discovered.memberships[0].business.id, activatedBusinessId);
+
+  const provisioned = await migrator.query(
+    `SELECT b.status AS business_status, tm.status AS membership_status,
+            r.template_code, br.code AS branch_code, s.scope_type, s.can_operate
+     FROM businesses b
+     JOIN tenant_memberships tm ON tm.tenant_id = b.id
+     JOIN membership_roles mr ON mr.tenant_id = tm.tenant_id AND mr.membership_id = tm.id
+     JOIN roles r ON r.tenant_id = mr.tenant_id AND r.id = mr.role_id
+     JOIN branches br ON br.tenant_id = b.id
+     JOIN membership_branch_scopes s ON s.tenant_id = tm.tenant_id AND s.membership_id = tm.id
+     WHERE b.id = $1`,
+    [activatedBusinessId],
+  );
+  assert.equal(provisioned.rowCount, 1);
+  assert.equal(provisioned.rows[0].business_status, "ACTIVE");
+  assert.equal(provisioned.rows[0].membership_status, "ACTIVE");
+  assert.equal(provisioned.rows[0].template_code, "OWNER");
+  assert.equal(provisioned.rows[0].branch_code, "MAIN");
+  assert.equal(provisioned.rows[0].scope_type, "BUSINESS");
+  assert.equal(provisioned.rows[0].can_operate, true);
+
+  const audit = await migrator.query(
+    "SELECT count(*)::int AS count FROM audit_events WHERE tenant_id = $1 AND action = 'business.activated'",
+    [activatedBusinessId],
+  );
+  assert.equal(audit.rows[0].count, 1);
 });

@@ -2,7 +2,7 @@
 
 ## Current schema
 
-`apps/api/prisma/schema.prisma` currently defines 18 models and one enum. The schema covers identity, businesses and membership, access foundations, sessions and one-time tokens, rate limits, platform-administrator grants, MFA lifecycle records, and audit events. Retail, inventory, repair, payment and customer-portal domain tables are not present.
+`apps/api/prisma/schema.prisma` currently defines 19 models and two enums. The schema covers identity, businesses and membership, access foundations, session and one-time token lifecycle, rate limits, platform-administrator grants, MFA lifecycle records, branch scopes and audit events. Catalogue, physical inventory, purchasing, receiving, transfers, repair, payment and customer-portal domain tables are still being implemented for 0.2 or later releases.
 
 ## Conventions in use
 
@@ -11,6 +11,8 @@
 - Time values use `Timestamptz(3)`; audit events have an occurrence timestamp and immutable history intent.
 - Runtime and migration roles use UTC as their PostgreSQL session timezone so `Date` values and SQL time comparisons remain consistent across developer and server host timezones.
 - Tenant-scoped rows carry `tenant_id`. Composite unique keys and foreign keys include tenant identity where relationships must not cross tenants (for example membership-role and role-permission links).
+- `membership_branch_scopes` uses tenant-composite membership and branch foreign keys. Partial unique indexes separately enforce one business-wide scope and one scope per branch because nullable columns do not provide the intended uniqueness semantics.
+- Permission identifiers are stable strings defined by the API permission catalogue and seeded in migration history. Runtime access to the permission table is read-only; migrations own additions. Branch visibility and ability to operate are distinct persisted flags.
 - Foreign keys generally use `RESTRICT` for business ownership links. Identity session/token records use explicit lifecycle and cascade/restrict choices visible in the schema.
 - Important lookup and lifecycle fields have indexes; add indexes based on concrete query patterns and measured plans.
 - State-like string fields are used in several models; validate transitions in application logic and add constraints when the allowed state set is stable.

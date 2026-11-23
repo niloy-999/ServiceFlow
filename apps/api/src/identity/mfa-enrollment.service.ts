@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { AuditService } from "../audit/audit.service.js";
 import { GlobalIdentityContextService } from "../database/global-identity-context.service.js";
 import { hasActivePlatformAdministrator } from "./platform-admin-policy.js";
+import { hasActiveBusinessAdministratorRole } from "./business-admin-policy.js";
 import { MfaCryptoService } from "./mfa-crypto.service.js";
 import { PasswordService } from "./password.service.js";
 
@@ -498,8 +499,9 @@ export class MfaEnrollmentService {
       }
 
       const isPlatformAdministrator = await hasActivePlatformAdministrator(tx, userId);
+      const isBusinessAdministrator = await hasActiveBusinessAdministratorRole(tx, userId);
 
-      if (isPlatformAdministrator) {
+      if (isPlatformAdministrator || isBusinessAdministrator) {
         await this.auditService.record(tx, {
           actorUserId: userId,
           tenantId: null,

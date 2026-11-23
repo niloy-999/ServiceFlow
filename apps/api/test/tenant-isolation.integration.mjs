@@ -8,6 +8,7 @@ import { Client } from "pg";
 import { AppModule } from "../dist/app.module.js";
 import { PrismaService } from "../dist/database/prisma.service.js";
 import { TenantContextService } from "../dist/database/tenant-context.service.js";
+import { AuthorizationService } from "../dist/authorization/authorization.service.js";
 
 const tenantA = randomUUID();
 const tenantB = randomUUID();
@@ -29,10 +30,18 @@ const permissionCode = `test.rls_${randomUUID().replaceAll("-", "")}`;
 
 const tenantIds = [tenantA, tenantB];
 
-const tables = ["tenant_memberships", "branches", "roles", "role_permissions", "membership_roles"];
+const tables = [
+  "tenant_memberships",
+  "branches",
+  "roles",
+  "role_permissions",
+  "membership_roles",
+  "membership_branch_scopes",
+];
 
 let app;
 let tenantContext;
+let authorization;
 let prisma;
 let migrator;
 let fixturesCreated = false;
@@ -126,6 +135,18 @@ async function createFixtures() {
          VALUES ($1, $2, $3)`,
         [tenantId, membershipId, roleId],
       );
+      await migrator.query(
+        `INSERT INTO role_permissions (tenant_id, role_id, permission_code)
+         VALUES ($1, $2, 'catalogue.read')`,
+        [tenantId, roleId],
+      );
+      const selectedBranch = tenantId === tenantA ? branchA : branchB;
+      await migrator.query(
+        `INSERT INTO membership_branch_scopes
+         (id, tenant_id, membership_id, scope_type, branch_id, can_view, can_operate)
+         VALUES ($1, $2, $3, 'BRANCH', $4, true, false)`,
+        [randomUUID(), tenantId, membershipId, selectedBranch],
+      );
     }
 
     await migrator.query("COMMIT");
@@ -139,6 +160,9 @@ async function cleanupFixtures() {
   await migrator.query("BEGIN");
 
   try {
+    await migrator.query(`DELETE FROM membership_branch_scopes WHERE tenant_id = ANY($1::uuid[])`, [
+      tenantIds,
+    ]);
     await migrator.query(`DELETE FROM membership_roles WHERE tenant_id = ANY($1::uuid[])`, [
       tenantIds,
     ]);
@@ -192,6 +216,7 @@ before(async () => {
   });
 
   tenantContext = app.get(TenantContextService);
+  authorization = app.get(AuthorizationService);
   prisma = app.get(PrismaService);
 
   const appIdentity = await prisma.$queryRaw`
@@ -313,6 +338,64 @@ test("Tenant access requires an active user, membership, and business", async ()
   }
 });
 
+test("Permissions and branch scopes are independently enforced in the tenant transaction", async () => {
+  await assert.rejects(
+    migrator.query(
+      `INSERT INTO membership_branch_scopes
+       (id, tenant_id, membership_id, scope_type, branch_id, can_view, can_operate)
+       VALUES ($1, $2, $3, 'BRANCH', $4, true, true)`,
+      [randomUUID(), tenantA, membershipA, branchB],
+    ),
+    (error) => error.code === "23503",
+    "A tenant scope cannot refer to a branch from another tenant",
+  );
+  const visible = await authorization.withPermission({
+    userId: userA,
+    tenantId: tenantA,
+    branchId: branchA,
+    permission: "catalogue.read",
+    operation: "VIEW",
+    callback: async () => "visible",
+  });
+  assert.equal(visible, "visible");
+  await assert.rejects(
+    authorization.withPermission({
+      userId: userA,
+      tenantId: tenantA,
+      branchId: branchA,
+      permission: "catalogue.read",
+      operation: "OPERATE",
+      callback: async () => "must not run",
+    }),
+  );
+  await assert.rejects(
+    authorization.withPermission({
+      userId: userA,
+      tenantId: tenantA,
+      branchId: branchB,
+      permission: "catalogue.read",
+      callback: async () => "must not run",
+    }),
+  );
+  await assert.rejects(
+    authorization.withPermission({
+      userId: userA,
+      tenantId: tenantA,
+      permission: "catalogue.read",
+      callback: async () => "must not run",
+    }),
+  );
+  await assert.rejects(
+    authorization.withPermission({
+      userId: userA,
+      tenantId: tenantB,
+      branchId: branchB,
+      permission: "catalogue.read",
+      callback: async () => "must not run",
+    }),
+  );
+});
+
 test("PostgreSQL enforces tenant isolation across concurrent transactions", async () => {
   const noContextCounts = await prisma.$transaction(async (tx) => {
     const counts = {};
@@ -349,7 +432,8 @@ test("PostgreSQL enforces tenant isolation across concurrent transactions", asyn
             otherTenantId,
           );
 
-          assert.equal(own[0].total, 1, `${table}: own tenant row must be visible`);
+          const expectedOwnRows = table === "role_permissions" ? 2 : 1;
+          assert.equal(own[0].total, expectedOwnRows, `${table}: own tenant rows must be visible`);
           assert.equal(foreign[0].total, 0, `${table}: foreign tenant row must be hidden`);
         }
       },
