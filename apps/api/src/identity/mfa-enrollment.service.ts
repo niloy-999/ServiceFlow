@@ -35,100 +35,88 @@ export class MfaEnrollmentService {
     password: string,
   ): Promise<{ provisioningUri: string; expiresAt: Date }> {
     const secret = this.mfaCrypto.generateTotpSecret();
-    const encryptedSecret = Uint8Array.from(
-      this.mfaCrypto.encryptSecret(secret),
-    );
+    const encryptedSecret = Uint8Array.from(this.mfaCrypto.encryptSecret(secret));
     const now = new Date();
     const expiresAt = new Date(now.getTime() + ENROLLMENT_LIFETIME_MS);
 
-    const result = await this.identityContext.withGlobalIdentityContext(
-      { userId },
-      async (tx) => {
-        const users = await tx.$queryRaw<LockedEnrollmentUser[]>`
+    const result = await this.identityContext.withGlobalIdentityContext({ userId }, async (tx) => {
+      const users = await tx.$queryRaw<LockedEnrollmentUser[]>`
           SELECT id, email_normalized, password_hash, status, email_verified_at
           FROM users
           WHERE id = ${userId}::uuid
           FOR UPDATE
         `;
-        const user = users[0];
+      const user = users[0];
 
-        if (
-          !user ||
-          user.status !== "ACTIVE" ||
-          user.email_verified_at === null ||
-          !(await this.passwordService.verifyPassword(
-            password,
-            user.password_hash,
-          ))
-        ) {
-          await this.auditService.record(tx, {
-            actorUserId: userId,
-            tenantId: null,
-            action: "auth.mfa.enrollment_failed",
-            targetType: "MFA_ENROLLMENT",
-            targetId: userId,
-            outcome: "FAILURE",
-          });
-          return { kind: "INVALID" as const };
-        }
-
-        const existing = await tx.mfaEnrollment.findUnique({
-          where: { userId },
-          select: { id: true },
-        });
-
-        if (existing) {
-          await tx.mfaEnrollment.update({
-            where: { userId },
-            data: {
-              encryptedSecret,
-              expiresAt,
-              updatedAt: now,
-            },
-          });
-        } else {
-          await tx.mfaEnrollment.create({
-            data: {
-              id: randomUUID(),
-              userId,
-              encryptedSecret,
-              expiresAt,
-              updatedAt: now,
-            },
-          });
-        }
-
-        const enrollment = await tx.mfaEnrollment.findUniqueOrThrow({
-          where: { userId },
-          select: { id: true },
-        });
-
+      if (
+        !user ||
+        user.status !== "ACTIVE" ||
+        user.email_verified_at === null ||
+        !(await this.passwordService.verifyPassword(password, user.password_hash))
+      ) {
         await this.auditService.record(tx, {
           actorUserId: userId,
           tenantId: null,
-          action: "auth.mfa.enrollment_started",
+          action: "auth.mfa.enrollment_failed",
           targetType: "MFA_ENROLLMENT",
-          targetId: enrollment.id,
-          outcome: "SUCCESS",
+          targetId: userId,
+          outcome: "FAILURE",
         });
+        return { kind: "INVALID" as const };
+      }
 
-        return {
-          kind: "STARTED" as const,
-          email: user.email_normalized,
-        };
-      },
-    );
+      const existing = await tx.mfaEnrollment.findUnique({
+        where: { userId },
+        select: { id: true },
+      });
+
+      if (existing) {
+        await tx.mfaEnrollment.update({
+          where: { userId },
+          data: {
+            encryptedSecret,
+            expiresAt,
+            updatedAt: now,
+          },
+        });
+      } else {
+        await tx.mfaEnrollment.create({
+          data: {
+            id: randomUUID(),
+            userId,
+            encryptedSecret,
+            expiresAt,
+            updatedAt: now,
+          },
+        });
+      }
+
+      const enrollment = await tx.mfaEnrollment.findUniqueOrThrow({
+        where: { userId },
+        select: { id: true },
+      });
+
+      await this.auditService.record(tx, {
+        actorUserId: userId,
+        tenantId: null,
+        action: "auth.mfa.enrollment_started",
+        targetType: "MFA_ENROLLMENT",
+        targetId: enrollment.id,
+        outcome: "SUCCESS",
+      });
+
+      return {
+        kind: "STARTED" as const,
+        email: user.email_normalized,
+      };
+    });
 
     if (result.kind !== "STARTED") {
       throw new UnauthorizedException("Password verification failed.");
     }
 
     return {
-      provisioningUri: this.mfaCrypto.createTotpProvisioningUri(
-        secret,
-        result.email,
-        MFA_ISSUER,
-      ),
+      provisioningUri: this.mfaCrypto.createTotpProvisioningUri(secret, result.email, MFA_ISSUER),
       expiresAt,
     };
   }
@@ -139,26 +127,69 @@ export class MfaEnrollmentService {
     pendingCode: string,
     currentCode?: string,
   ): Promise<{ enabledAt: Date; replaced: boolean }> {
-    const result = await this.identityContext.withGlobalIdentityContext(
-      { userId },
-      async (tx) => {
-        const users = await tx.$queryRaw<LockedEnrollmentUser[]>`
+    const result = await this.identityContext.withGlobalIdentityContext({ userId }, async (tx) => {
+      const users = await tx.$queryRaw<LockedEnrollmentUser[]>`
           SELECT id, email_normalized, password_hash, status, email_verified_at
           FROM users
           WHERE id = ${userId}::uuid
           FOR UPDATE
         `;
-        const user = users[0];
+      const user = users[0];
 
-        if (
-          !user ||
-          user.status !== "ACTIVE" ||
-          user.email_verified_at === null ||
-          !(await this.passwordService.verifyPassword(
-            password,
-            user.password_hash,
-          ))
-        ) {
+      if (
+        !user ||
+        user.status !== "ACTIVE" ||
+        user.email_verified_at === null ||
+        !(await this.passwordService.verifyPassword(password, user.password_hash))
+      ) {
+        await this.auditService.record(tx, {
+          actorUserId: userId,
+          tenantId: null,
+          action: "auth.mfa.enrollment_confirmation_failed",
+          targetType: "USER_MFA",
+          targetId: userId,
+          outcome: "FAILURE",
+        });
+        return { kind: "INVALID" as const };
+      }
+
+      const now = new Date();
+      const enrollment = await tx.mfaEnrollment.findUnique({
+        where: { userId },
+        select: {
+          id: true,
+          encryptedSecret: true,
+          expiresAt: true,
+        },
+      });
+
+      if (!enrollment || enrollment.expiresAt <= now) {
+        await this.auditService.record(tx, {
+          actorUserId: userId,
+          tenantId: null,
+          action: "auth.mfa.enrollment_confirmation_failed",
+          targetType: "MFA_ENROLLMENT",
+          targetId: enrollment?.id ?? userId,
+          outcome: "FAILURE",
+        });
+        return { kind: "INVALID" as const };
+      }
+
+      const activeMfa = await tx.userMfa.findUnique({
+        where: { userId },
+        select: {
+          status: true,
+          encryptedSecret: true,
+          lastAcceptedTimeStep: true,
+        },
+      });
+
+      const replacing = activeMfa?.status === "ENABLED";
+      let currentStep: number | null = null;
+
+      // Verify the existing factor first, but do not consume its step yet.
+      if (replacing) {
+        if (!currentCode) {
           await this.auditService.record(tx, {
             actorUserId: userId,
             tenantId: null,
@@ -170,107 +201,47 @@ export class MfaEnrollmentService {
           return { kind: "INVALID" as const };
         }
 
-        const now = new Date();
-        const enrollment = await tx.mfaEnrollment.findUnique({
-          where: { userId },
-          select: {
-            id: true,
-            encryptedSecret: true,
-            expiresAt: true,
-          },
-        });
+        const activeSecret = this.mfaCrypto.decryptSecret(Buffer.from(activeMfa.encryptedSecret));
 
-        if (!enrollment || enrollment.expiresAt <= now) {
+        currentStep = this.mfaCrypto.verifyTotpCode(activeSecret, currentCode, now.getTime());
+
+        if (
+          currentStep === null ||
+          (activeMfa.lastAcceptedTimeStep !== null &&
+            BigInt(currentStep) <= activeMfa.lastAcceptedTimeStep)
+        ) {
           await this.auditService.record(tx, {
             actorUserId: userId,
             tenantId: null,
             action: "auth.mfa.enrollment_confirmation_failed",
-            targetType: "MFA_ENROLLMENT",
-            targetId: enrollment?.id ?? userId,
+            targetType: "USER_MFA",
+            targetId: userId,
             outcome: "FAILURE",
           });
           return { kind: "INVALID" as const };
         }
+      }
 
-        const activeMfa = await tx.userMfa.findUnique({
-          where: { userId },
-          select: {
-            status: true,
-            encryptedSecret: true,
-            lastAcceptedTimeStep: true,
-          },
+      // Verify the pending authenticator before changing any replay state.
+      const pendingSecret = this.mfaCrypto.decryptSecret(Buffer.from(enrollment.encryptedSecret));
+      const pendingStep = this.mfaCrypto.verifyTotpCode(pendingSecret, pendingCode, now.getTime());
+
+      if (pendingStep === null) {
+        await this.auditService.record(tx, {
+          actorUserId: userId,
+          tenantId: null,
+          action: "auth.mfa.enrollment_confirmation_failed",
+          targetType: "MFA_ENROLLMENT",
+          targetId: enrollment.id,
+          outcome: "FAILURE",
         });
+        return { kind: "INVALID" as const };
+      }
 
-        const replacing = activeMfa?.status === "ENABLED";
-        let currentStep: number | null = null;
-
-        // Verify the existing factor first, but do not consume its step yet.
-        if (replacing) {
-          if (!currentCode) {
-            await this.auditService.record(tx, {
-              actorUserId: userId,
-              tenantId: null,
-              action: "auth.mfa.enrollment_confirmation_failed",
-              targetType: "USER_MFA",
-              targetId: userId,
-              outcome: "FAILURE",
-            });
-            return { kind: "INVALID" as const };
-          }
-
-          const activeSecret = this.mfaCrypto.decryptSecret(
-            Buffer.from(activeMfa.encryptedSecret),
-          );
-
-          currentStep = this.mfaCrypto.verifyTotpCode(
-            activeSecret,
-            currentCode,
-            now.getTime(),
-          );
-
-          if (
-            currentStep === null ||
-            (activeMfa.lastAcceptedTimeStep !== null &&
-              BigInt(currentStep) <= activeMfa.lastAcceptedTimeStep)
-          ) {
-            await this.auditService.record(tx, {
-              actorUserId: userId,
-              tenantId: null,
-              action: "auth.mfa.enrollment_confirmation_failed",
-              targetType: "USER_MFA",
-              targetId: userId,
-              outcome: "FAILURE",
-            });
-            return { kind: "INVALID" as const };
-          }
-        }
-
-        // Verify the pending authenticator before changing any replay state.
-        const pendingSecret = this.mfaCrypto.decryptSecret(
-          Buffer.from(enrollment.encryptedSecret),
-        );
-        const pendingStep = this.mfaCrypto.verifyTotpCode(
-          pendingSecret,
-          pendingCode,
-          now.getTime(),
-        );
-
-        if (pendingStep === null) {
-          await this.auditService.record(tx, {
-            actorUserId: userId,
-            tenantId: null,
-            action: "auth.mfa.enrollment_confirmation_failed",
-            targetType: "MFA_ENROLLMENT",
-            targetId: enrollment.id,
-            outcome: "FAILURE",
-          });
-          return { kind: "INVALID" as const };
-        }
-
-        // Consume the existing factor's accepted step only after both
-        // factors have been verified. The conditional update is replay-safe.
-        if (replacing && currentStep !== null) {
-          const updated = await tx.$queryRaw<{ user_id: string }[]>`
+      // Consume the existing factor's accepted step only after both
+      // factors have been verified. The conditional update is replay-safe.
+      if (replacing && currentStep !== null) {
+        const updated = await tx.$queryRaw<{ user_id: string }[]>`
             UPDATE user_mfa
             SET
               last_accepted_time_step = ${BigInt(currentStep)},
@@ -284,20 +255,20 @@ export class MfaEnrollmentService {
             RETURNING user_id
           `;
 
-          if (updated.length !== 1) {
-            await this.auditService.record(tx, {
-              actorUserId: userId,
-              tenantId: null,
-              action: "auth.mfa.enrollment_confirmation_failed",
-              targetType: "USER_MFA",
-              targetId: userId,
-              outcome: "FAILURE",
-            });
-            return { kind: "INVALID" as const };
-          }
+        if (updated.length !== 1) {
+          await this.auditService.record(tx, {
+            actorUserId: userId,
+            tenantId: null,
+            action: "auth.mfa.enrollment_confirmation_failed",
+            targetType: "USER_MFA",
+            targetId: userId,
+            outcome: "FAILURE",
+          });
+          return { kind: "INVALID" as const };
         }
+      }
 
-        const activation = await tx.$queryRaw<ActivationResult[]>`
+      const activation = await tx.$queryRaw<ActivationResult[]>`
           SELECT public.activate_mfa_enrollment(
             ${userId}::uuid,
             ${enrollment.id}::uuid,
@@ -305,36 +276,31 @@ export class MfaEnrollmentService {
           ) AS enabled_at
         `;
 
-        const activationResult = activation[0];
-        if (activation.length !== 1 || !activationResult) {
-          throw new Error("MFA activation returned an unexpected result.");
-        }
+      const activationResult = activation[0];
+      if (activation.length !== 1 || !activationResult) {
+        throw new Error("MFA activation returned an unexpected result.");
+      }
 
-        const enabledAt = activationResult.enabled_at;
+      const enabledAt = activationResult.enabled_at;
 
-        await this.auditService.record(tx, {
-          actorUserId: userId,
-          tenantId: null,
-          action: replacing
-            ? "auth.mfa.authenticator_replaced"
-            : "auth.mfa.enabled",
-          targetType: "USER_MFA",
-          targetId: userId,
-          outcome: "SUCCESS",
-        });
+      await this.auditService.record(tx, {
+        actorUserId: userId,
+        tenantId: null,
+        action: replacing ? "auth.mfa.authenticator_replaced" : "auth.mfa.enabled",
+        targetType: "USER_MFA",
+        targetId: userId,
+        outcome: "SUCCESS",
+      });
 
-        return {
-          kind: "CONFIRMED" as const,
-          enabledAt,
-          replaced: replacing,
-        };
-      },
-    );
+      return {
+        kind: "CONFIRMED" as const,
+        enabledAt,
+        replaced: replacing,
+      };
+    });
 
     if (result.kind !== "CONFIRMED") {
-      throw new UnauthorizedException(
-        "MFA enrollment confirmation failed.",
-      );
+      throw new UnauthorizedException("MFA enrollment confirmation failed.");
     }
 
     return {
@@ -348,100 +314,84 @@ export class MfaEnrollmentService {
     password: string,
     currentCode: string,
   ): Promise<{ recoveryCodes: string[]; regeneratedAt: Date }> {
-    const recoveryCodes = Array.from(
-      { length: 10 },
-      () => this.mfaCrypto.generateRecoveryCode(),
-    );
-    const recoveryCodeHashes = recoveryCodes.map((code) =>
-      this.mfaCrypto.hashRecoveryCode(code),
-    );
+    const recoveryCodes = Array.from({ length: 10 }, () => this.mfaCrypto.generateRecoveryCode());
+    const recoveryCodeHashes = recoveryCodes.map((code) => this.mfaCrypto.hashRecoveryCode(code));
 
-    const result = await this.identityContext.withGlobalIdentityContext(
-      { userId },
-      async (tx) => {
-        const users = await tx.$queryRaw<LockedEnrollmentUser[]>`
+    const result = await this.identityContext.withGlobalIdentityContext({ userId }, async (tx) => {
+      const users = await tx.$queryRaw<LockedEnrollmentUser[]>`
           SELECT id, email_normalized, password_hash, status, email_verified_at
           FROM users
           WHERE id = ${userId}::uuid
           FOR UPDATE
         `;
 
-        const user = users[0];
+      const user = users[0];
 
-        if (
-          !user ||
-          user.status !== "ACTIVE" ||
-          user.email_verified_at === null ||
-          !(await this.passwordService.verifyPassword(
-            password,
-            user.password_hash,
-          ))
-        ) {
-          await this.auditService.record(tx, {
-            actorUserId: userId,
-            tenantId: null,
-            action: "auth.mfa.recovery_codes_regeneration_failed",
-            targetType: "USER_MFA",
-            targetId: userId,
-            outcome: "FAILURE",
-          });
-
-          return { kind: "INVALID" as const };
-        }
-
-        const now = new Date();
-
-        const activeMfa = await tx.userMfa.findUnique({
-          where: { userId },
-          select: {
-            status: true,
-            encryptedSecret: true,
-            lastAcceptedTimeStep: true,
-          },
+      if (
+        !user ||
+        user.status !== "ACTIVE" ||
+        user.email_verified_at === null ||
+        !(await this.passwordService.verifyPassword(password, user.password_hash))
+      ) {
+        await this.auditService.record(tx, {
+          actorUserId: userId,
+          tenantId: null,
+          action: "auth.mfa.recovery_codes_regeneration_failed",
+          targetType: "USER_MFA",
+          targetId: userId,
+          outcome: "FAILURE",
         });
 
-        if (!activeMfa || activeMfa.status !== "ENABLED") {
-          await this.auditService.record(tx, {
-            actorUserId: userId,
-            tenantId: null,
-            action: "auth.mfa.recovery_codes_regeneration_failed",
-            targetType: "USER_MFA",
-            targetId: userId,
-            outcome: "FAILURE",
-          });
+        return { kind: "INVALID" as const };
+      }
 
-          return { kind: "INVALID" as const };
-        }
+      const now = new Date();
 
-        const activeSecret = this.mfaCrypto.decryptSecret(
-          Buffer.from(activeMfa.encryptedSecret),
-        );
+      const activeMfa = await tx.userMfa.findUnique({
+        where: { userId },
+        select: {
+          status: true,
+          encryptedSecret: true,
+          lastAcceptedTimeStep: true,
+        },
+      });
 
-        const currentStep = this.mfaCrypto.verifyTotpCode(
-          activeSecret,
-          currentCode,
-          now.getTime(),
-        );
+      if (!activeMfa || activeMfa.status !== "ENABLED") {
+        await this.auditService.record(tx, {
+          actorUserId: userId,
+          tenantId: null,
+          action: "auth.mfa.recovery_codes_regeneration_failed",
+          targetType: "USER_MFA",
+          targetId: userId,
+          outcome: "FAILURE",
+        });
 
-        if (
-          currentStep === null ||
-          (activeMfa.lastAcceptedTimeStep !== null &&
-            BigInt(currentStep) <= activeMfa.lastAcceptedTimeStep)
-        ) {
-          await this.auditService.record(tx, {
-            actorUserId: userId,
-            tenantId: null,
-            action: "auth.mfa.recovery_codes_regeneration_failed",
-            targetType: "USER_MFA",
-            targetId: userId,
-            outcome: "FAILURE",
-          });
+        return { kind: "INVALID" as const };
+      }
 
-          return { kind: "INVALID" as const };
-        }
+      const activeSecret = this.mfaCrypto.decryptSecret(Buffer.from(activeMfa.encryptedSecret));
 
-        // Consume the accepted TOTP step before replacing the recovery batch.
-        const updated = await tx.$queryRaw<{ user_id: string }[]>`
+      const currentStep = this.mfaCrypto.verifyTotpCode(activeSecret, currentCode, now.getTime());
+
+      if (
+        currentStep === null ||
+        (activeMfa.lastAcceptedTimeStep !== null &&
+          BigInt(currentStep) <= activeMfa.lastAcceptedTimeStep)
+      ) {
+        await this.auditService.record(tx, {
+          actorUserId: userId,
+          tenantId: null,
+          action: "auth.mfa.recovery_codes_regeneration_failed",
+          targetType: "USER_MFA",
+          targetId: userId,
+          outcome: "FAILURE",
+        });
+
+        return { kind: "INVALID" as const };
+      }
+
+      // Consume the accepted TOTP step before replacing the recovery batch.
+      const updated = await tx.$queryRaw<{ user_id: string }[]>`
           UPDATE user_mfa
           SET
             last_accepted_time_step = ${BigInt(currentStep)},
@@ -455,62 +405,59 @@ export class MfaEnrollmentService {
           RETURNING user_id
         `;
 
-        if (updated.length !== 1) {
-          await this.auditService.record(tx, {
-            actorUserId: userId,
-            tenantId: null,
-            action: "auth.mfa.recovery_codes_regeneration_failed",
-            targetType: "USER_MFA",
-            targetId: userId,
-            outcome: "FAILURE",
-          });
-
-          return { kind: "INVALID" as const };
-        }
-
-        // Existing codes are invalidated atomically with the new batch.
-        await tx.mfaRecoveryCode.updateMany({
-          where: {
-            userId,
-            consumedAt: null,
-          },
-          data: {
-            consumedAt: now,
-          },
-        });
-
-        const inserted = await tx.mfaRecoveryCode.createMany({
-          data: recoveryCodeHashes.map((codeHash) => ({
-            id: randomUUID(),
-            userId,
-            codeHash,
-          })),
-        });
-
-        if (inserted.count !== recoveryCodeHashes.length) {
-          throw new Error("Recovery-code batch insertion was incomplete.");
-        }
-
+      if (updated.length !== 1) {
         await this.auditService.record(tx, {
           actorUserId: userId,
           tenantId: null,
-          action: "auth.mfa.recovery_codes_regenerated",
+          action: "auth.mfa.recovery_codes_regeneration_failed",
           targetType: "USER_MFA",
           targetId: userId,
-          outcome: "SUCCESS",
+          outcome: "FAILURE",
         });
 
-        return {
-          kind: "REGENERATED" as const,
-          regeneratedAt: now,
-        };
-      },
-    );
+        return { kind: "INVALID" as const };
+      }
+
+      // Existing codes are invalidated atomically with the new batch.
+      await tx.mfaRecoveryCode.updateMany({
+        where: {
+          userId,
+          consumedAt: null,
+        },
+        data: {
+          consumedAt: now,
+        },
+      });
+
+      const inserted = await tx.mfaRecoveryCode.createMany({
+        data: recoveryCodeHashes.map((codeHash) => ({
+          id: randomUUID(),
+          userId,
+          codeHash,
+        })),
+      });
+
+      if (inserted.count !== recoveryCodeHashes.length) {
+        throw new Error("Recovery-code batch insertion was incomplete.");
+      }
+
+      await this.auditService.record(tx, {
+        actorUserId: userId,
+        tenantId: null,
+        action: "auth.mfa.recovery_codes_regenerated",
+        targetType: "USER_MFA",
+        targetId: userId,
+        outcome: "SUCCESS",
+      });
+
+      return {
+        kind: "REGENERATED" as const,
+        regeneratedAt: now,
+      };
+    });
 
     if (result.kind !== "REGENERATED") {
-      throw new UnauthorizedException(
-        "Recovery-code regeneration failed.",
-      );
+      throw new UnauthorizedException("Recovery-code regeneration failed.");
     }
 
     return {
@@ -519,106 +466,93 @@ export class MfaEnrollmentService {
     };
   }
 
-
   async disableMfa(
     userId: string,
     password: string,
     currentCode: string,
   ): Promise<{ disabledAt: Date; revokedSessions: number }> {
-    const result = await this.identityContext.withGlobalIdentityContext(
-      { userId },
-      async (tx) => {
-        const users = await tx.$queryRaw<LockedEnrollmentUser[]>`
+    const result = await this.identityContext.withGlobalIdentityContext({ userId }, async (tx) => {
+      const users = await tx.$queryRaw<LockedEnrollmentUser[]>`
           SELECT id, email_normalized, password_hash, status, email_verified_at
           FROM users
           WHERE id = ${userId}::uuid
           FOR UPDATE
         `;
-        const user = users[0];
+      const user = users[0];
 
-        if (
-          !user ||
-          user.status !== "ACTIVE" ||
-          user.email_verified_at === null ||
-          !(await this.passwordService.verifyPassword(
-            password,
-            user.password_hash,
-          ))
-        ) {
-          await this.auditService.record(tx, {
-            actorUserId: userId,
-            tenantId: null,
-            action: "auth.mfa.disable_failed",
-            targetType: "USER_MFA",
-            targetId: userId,
-            outcome: "FAILURE",
-          });
-          return { kind: "INVALID" as const };
-        }
-
-        const isPlatformAdministrator =
-          await hasActivePlatformAdministrator(tx, userId);
-
-        if (isPlatformAdministrator) {
-          await this.auditService.record(tx, {
-            actorUserId: userId,
-            tenantId: null,
-            action: "auth.mfa.disable_failed",
-            targetType: "USER_MFA",
-            targetId: userId,
-            outcome: "FAILURE",
-          });
-          return { kind: "INVALID" as const };
-        }
-
-        const activeMfa = await tx.userMfa.findUnique({
-          where: { userId },
-          select: {
-            status: true,
-            encryptedSecret: true,
-            lastAcceptedTimeStep: true,
-          },
+      if (
+        !user ||
+        user.status !== "ACTIVE" ||
+        user.email_verified_at === null ||
+        !(await this.passwordService.verifyPassword(password, user.password_hash))
+      ) {
+        await this.auditService.record(tx, {
+          actorUserId: userId,
+          tenantId: null,
+          action: "auth.mfa.disable_failed",
+          targetType: "USER_MFA",
+          targetId: userId,
+          outcome: "FAILURE",
         });
+        return { kind: "INVALID" as const };
+      }
 
-        if (!activeMfa || activeMfa.status !== "ENABLED") {
-          await this.auditService.record(tx, {
-            actorUserId: userId,
-            tenantId: null,
-            action: "auth.mfa.disable_failed",
-            targetType: "USER_MFA",
-            targetId: userId,
-            outcome: "FAILURE",
-          });
-          return { kind: "INVALID" as const };
-        }
+      const isPlatformAdministrator = await hasActivePlatformAdministrator(tx, userId);
 
-        const now = new Date();
-        const activeSecret = this.mfaCrypto.decryptSecret(
-          Buffer.from(activeMfa.encryptedSecret),
-        );
-        const currentStep = this.mfaCrypto.verifyTotpCode(
-          activeSecret,
-          currentCode,
-          now.getTime(),
-        );
+      if (isPlatformAdministrator) {
+        await this.auditService.record(tx, {
+          actorUserId: userId,
+          tenantId: null,
+          action: "auth.mfa.disable_failed",
+          targetType: "USER_MFA",
+          targetId: userId,
+          outcome: "FAILURE",
+        });
+        return { kind: "INVALID" as const };
+      }
 
-        if (
-          currentStep === null ||
-          (activeMfa.lastAcceptedTimeStep !== null &&
-            BigInt(currentStep) <= activeMfa.lastAcceptedTimeStep)
-        ) {
-          await this.auditService.record(tx, {
-            actorUserId: userId,
-            tenantId: null,
-            action: "auth.mfa.disable_failed",
-            targetType: "USER_MFA",
-            targetId: userId,
-            outcome: "FAILURE",
-          });
-          return { kind: "INVALID" as const };
-        }
+      const activeMfa = await tx.userMfa.findUnique({
+        where: { userId },
+        select: {
+          status: true,
+          encryptedSecret: true,
+          lastAcceptedTimeStep: true,
+        },
+      });
 
-        const updated = await tx.$queryRaw<{ user_id: string }[]>`
+      if (!activeMfa || activeMfa.status !== "ENABLED") {
+        await this.auditService.record(tx, {
+          actorUserId: userId,
+          tenantId: null,
+          action: "auth.mfa.disable_failed",
+          targetType: "USER_MFA",
+          targetId: userId,
+          outcome: "FAILURE",
+        });
+        return { kind: "INVALID" as const };
+      }
+
+      const now = new Date();
+      const activeSecret = this.mfaCrypto.decryptSecret(Buffer.from(activeMfa.encryptedSecret));
+      const currentStep = this.mfaCrypto.verifyTotpCode(activeSecret, currentCode, now.getTime());
+
+      if (
+        currentStep === null ||
+        (activeMfa.lastAcceptedTimeStep !== null &&
+          BigInt(currentStep) <= activeMfa.lastAcceptedTimeStep)
+      ) {
+        await this.auditService.record(tx, {
+          actorUserId: userId,
+          tenantId: null,
+          action: "auth.mfa.disable_failed",
+          targetType: "USER_MFA",
+          targetId: userId,
+          outcome: "FAILURE",
+        });
+        return { kind: "INVALID" as const };
+      }
+
+      const updated = await tx.$queryRaw<{ user_id: string }[]>`
           UPDATE user_mfa
           SET
             last_accepted_time_step = ${BigInt(currentStep)},
@@ -632,46 +566,43 @@ export class MfaEnrollmentService {
           RETURNING user_id
         `;
 
-        if (updated.length !== 1) {
-          await this.auditService.record(tx, {
-            actorUserId: userId,
-            tenantId: null,
-            action: "auth.mfa.disable_failed",
-            targetType: "USER_MFA",
-            targetId: userId,
-            outcome: "FAILURE",
-          });
-          return { kind: "INVALID" as const };
-        }
+      if (updated.length !== 1) {
+        await this.auditService.record(tx, {
+          actorUserId: userId,
+          tenantId: null,
+          action: "auth.mfa.disable_failed",
+          targetType: "USER_MFA",
+          targetId: userId,
+          outcome: "FAILURE",
+        });
+        return { kind: "INVALID" as const };
+      }
 
-        const disabled = await tx.$queryRaw<
-          { disabled_at: Date; revoked_sessions: number }[]
-        >`
+      const disabled = await tx.$queryRaw<{ disabled_at: Date; revoked_sessions: number }[]>`
           SELECT *
           FROM public.disable_user_mfa(${userId}::uuid)
         `;
 
-        const disabledResult = disabled[0];
-        if (disabled.length !== 1 || !disabledResult) {
-          throw new Error("MFA disable returned an unexpected result.");
-        }
+      const disabledResult = disabled[0];
+      if (disabled.length !== 1 || !disabledResult) {
+        throw new Error("MFA disable returned an unexpected result.");
+      }
 
-        await this.auditService.record(tx, {
-          actorUserId: userId,
-          tenantId: null,
-          action: "auth.mfa.disabled",
-          targetType: "USER_MFA",
-          targetId: userId,
-          outcome: "SUCCESS",
-        });
+      await this.auditService.record(tx, {
+        actorUserId: userId,
+        tenantId: null,
+        action: "auth.mfa.disabled",
+        targetType: "USER_MFA",
+        targetId: userId,
+        outcome: "SUCCESS",
+      });
 
-        return {
-          kind: "DISABLED" as const,
-          disabledAt: disabledResult.disabled_at,
-          revokedSessions: disabledResult.revoked_sessions,
-        };
-      },
-    );
+      return {
+        kind: "DISABLED" as const,
+        disabledAt: disabledResult.disabled_at,
+        revokedSessions: disabledResult.revoked_sessions,
+      };
+    });
 
     if (result.kind !== "DISABLED") {
       throw new UnauthorizedException("MFA disable failed.");
@@ -682,5 +613,4 @@ export class MfaEnrollmentService {
       revokedSessions: result.revokedSessions,
     };
   }
-
 }

@@ -9,10 +9,7 @@ const LOCK_NAMESPACE = 20261123;
 const LOCK_ID = 121;
 const EXPECTED_ROLE = "serviceflow_migrator";
 
-const TABLES = [
-  "user_mfa",
-  "mfa_enrollments",
-];
+const TABLES = ["user_mfa", "mfa_enrollments"];
 
 export function parseArguments(args) {
   const normalizedArgs = args[0] === "--" ? args.slice(1) : args;
@@ -67,10 +64,7 @@ function createCryptoService() {
     throw new Error("Explicit MFA keyring and key IDs are required.");
   }
 
-  if (
-    process.env.MFA_ENCRYPTION_LEGACY_KEY_ID ===
-    process.env.MFA_ENCRYPTION_ACTIVE_KEY_ID
-  ) {
+  if (process.env.MFA_ENCRYPTION_LEGACY_KEY_ID === process.env.MFA_ENCRYPTION_ACTIVE_KEY_ID) {
     throw new Error("The active key must differ from the legacy key.");
   }
 
@@ -86,10 +80,7 @@ async function assertDatabaseIdentity(client, expectedDatabase) {
 
   const identity = result.rows[0];
 
-  if (
-    identity.role !== EXPECTED_ROLE ||
-    identity.database !== expectedDatabase
-  ) {
+  if (identity.role !== EXPECTED_ROLE || identity.database !== expectedDatabase) {
     throw new Error("Database identity check failed.");
   }
 }
@@ -114,9 +105,7 @@ async function assertTableSecurity(client) {
     [TABLES],
   );
 
-  const metadata = new Map(
-    result.rows.map((row) => [row.table_name, row]),
-  );
+  const metadata = new Map(result.rows.map((row) => [row.table_name, row]));
 
   for (const table of TABLES) {
     const row = metadata.get(table);
@@ -133,10 +122,10 @@ async function assertTableSecurity(client) {
 }
 
 async function acquireLock(client) {
-  const result = await client.query(
-    "SELECT pg_try_advisory_lock($1, $2) AS acquired",
-    [LOCK_NAMESPACE, LOCK_ID],
-  );
+  const result = await client.query("SELECT pg_try_advisory_lock($1, $2) AS acquired", [
+    LOCK_NAMESPACE,
+    LOCK_ID,
+  ]);
 
   if (result.rows[0]?.acquired !== true) {
     throw new Error("Another MFA key-maintenance process is running.");
@@ -144,10 +133,7 @@ async function acquireLock(client) {
 }
 
 async function releaseLock(client) {
-  await client.query(
-    "SELECT pg_advisory_unlock($1, $2)",
-    [LOCK_NAMESPACE, LOCK_ID],
-  );
+  await client.query("SELECT pg_advisory_unlock($1, $2)", [LOCK_NAMESPACE, LOCK_ID]);
 }
 
 async function processTable(client, crypto, table, mode) {
@@ -257,16 +243,14 @@ async function processTable(client, crypto, table, mode) {
 function printTableResult(table, result) {
   console.log(
     `${table}: total=${result.total}, ` +
-    `current=${result.current}, ` +
-    `needs_rotation=${result.needsRotation}, ` +
-    `updated=${result.updated}`,
+      `current=${result.current}, ` +
+      `needs_rotation=${result.needsRotation}, ` +
+      `updated=${result.updated}`,
   );
 }
 
 async function main() {
-  const { mode, expectedDatabase } = parseArguments(
-    process.argv.slice(2),
-  );
+  const { mode, expectedDatabase } = parseArguments(process.argv.slice(2));
 
   if (!process.env.MIGRATION_DATABASE_URL) {
     throw new Error("MIGRATION_DATABASE_URL is required.");
@@ -325,7 +309,7 @@ async function main() {
     } else if (mode === "dry-run") {
       console.log(
         `Dry-run complete: ${totalRecords} records inspected; ` +
-        `${remainingRecords} require rotation. No records were modified.`,
+          `${remainingRecords} require rotation. No records were modified.`,
       );
     } else {
       console.log("Verification passed: every record uses the active key.");
@@ -338,9 +322,7 @@ async function main() {
         await releaseLock(client);
       } catch {
         cleanupFailed = true;
-        console.error(
-          "Warning: advisory lock release failed; closing connection.",
-        );
+        console.error("Warning: advisory lock release failed; closing connection.");
       }
     }
 
@@ -360,10 +342,7 @@ async function main() {
   }
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(() => {
     // Do not print raw database or crypto errors: they may contain
     // sensitive connection, query, or record information.

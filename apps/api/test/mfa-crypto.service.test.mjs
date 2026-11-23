@@ -18,19 +18,12 @@ function createConfiguredService(keys, activeKeyId, legacyKeyId) {
     "MFA_ENCRYPTION_ACTIVE_KEY_ID",
     "MFA_ENCRYPTION_LEGACY_KEY_ID",
   ];
-  const previous = Object.fromEntries(
-    names.map((name) => [name, process.env[name]]),
-  );
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
 
   try {
     delete process.env.MFA_ENCRYPTION_KEY;
     process.env.MFA_ENCRYPTION_KEYS = JSON.stringify(
-      Object.fromEntries(
-        Object.entries(keys).map(([id, key]) => [
-          id,
-          key.toString("base64"),
-        ]),
-      ),
+      Object.fromEntries(Object.entries(keys).map(([id, key]) => [id, key.toString("base64")])),
     );
     process.env.MFA_ENCRYPTION_ACTIVE_KEY_ID = activeKeyId;
     process.env.MFA_ENCRYPTION_LEGACY_KEY_ID = legacyKeyId;
@@ -57,9 +50,7 @@ function assertInvalidKeyringConfiguration(
     "MFA_ENCRYPTION_ACTIVE_KEY_ID",
     "MFA_ENCRYPTION_LEGACY_KEY_ID",
   ];
-  const previous = Object.fromEntries(
-    names.map((name) => [name, process.env[name]]),
-  );
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
 
   try {
     for (const name of names) {
@@ -91,10 +82,7 @@ function assertInvalidKeyringConfiguration(
 function encryptLegacySecret(secret, key) {
   const nonce = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, nonce);
-  const ciphertext = Buffer.concat([
-    cipher.update(secret),
-    cipher.final(),
-  ]);
+  const ciphertext = Buffer.concat([cipher.update(secret), cipher.final()]);
 
   return Buffer.concat([nonce, cipher.getAuthTag(), ciphertext]);
 }
@@ -129,13 +117,7 @@ test("AES-GCM rejects modified ciphertext and authentication tags", () => {
   const nonceOffset = headerLength;
   const authTagOffset = nonceOffset + 12;
 
-  for (const index of [
-    0,
-    8,
-    nonceOffset,
-    authTagOffset,
-    encrypted.length - 1,
-  ]) {
+  for (const index of [0, 8, nonceOffset, authTagOffset, encrypted.length - 1]) {
     const modified = Buffer.from(encrypted);
     modified[index] ^= 0x01;
 
@@ -164,19 +146,11 @@ test("Multiple configured keys decrypt legacy and versioned secrets", () => {
   const keyV2 = randomBytes(32);
   const secret = randomBytes(20);
 
-  const v1Service = createConfiguredService(
-    { v1: keyV1, v2: keyV2 },
-    "v1",
-    "v1",
-  );
+  const v1Service = createConfiguredService({ v1: keyV1, v2: keyV2 }, "v1", "v1");
   const legacy = encryptLegacySecret(secret, keyV1);
   const versionedV1 = v1Service.encryptSecret(secret);
 
-  const v2Service = createConfiguredService(
-    { v1: keyV1, v2: keyV2 },
-    "v2",
-    "v1",
-  );
+  const v2Service = createConfiguredService({ v1: keyV1, v2: keyV2 }, "v2", "v1");
   const versionedV2 = v2Service.encryptSecret(secret);
 
   assert.deepEqual(v2Service.decryptSecret(legacy), secret);
@@ -193,27 +167,16 @@ test("Unknown envelope key IDs are rejected", () => {
   const keyV1 = randomBytes(32);
   const keyV2 = randomBytes(32);
 
-  const v1Service = createConfiguredService(
-    { v1: keyV1 },
-    "v1",
-    "v1",
-  );
+  const v1Service = createConfiguredService({ v1: keyV1 }, "v1", "v1");
   const encrypted = v1Service.encryptSecret(randomBytes(20));
 
   // The key ID begins immediately after the 8-byte magic and 2-byte header.
   encrypted[10] = "z".charCodeAt(0);
 
-  const v2OnlyService = createConfiguredService(
-    { v2: keyV2 },
-    "v2",
-    "v2",
-  );
+  const v2OnlyService = createConfiguredService({ v2: keyV2 }, "v2", "v2");
 
   assert.equal(v2OnlyService.getEncryptedSecretKeyId(encrypted), "z1");
-  assert.throws(
-    () => v2OnlyService.decryptSecret(encrypted),
-    /Unable to decrypt MFA secret/,
-  );
+  assert.throws(() => v2OnlyService.decryptSecret(encrypted), /Unable to decrypt MFA secret/);
 });
 
 test("Versioned envelope key IDs are authenticated", () => {
@@ -221,11 +184,7 @@ test("Versioned envelope key IDs are authenticated", () => {
   const keyV2 = randomBytes(32);
   const secret = randomBytes(20);
 
-  const service = createConfiguredService(
-    { v1: keyV1, v2: keyV2 },
-    "v1",
-    "v1",
-  );
+  const service = createConfiguredService({ v1: keyV1, v2: keyV2 }, "v1", "v1");
 
   const encrypted = service.encryptSecret(secret);
 
@@ -233,17 +192,10 @@ test("Versioned envelope key IDs are authenticated", () => {
   encrypted[10] = "v".charCodeAt(0);
   encrypted[11] = "2".charCodeAt(0);
 
-  const multiKeyService = createConfiguredService(
-    { v1: keyV1, v2: keyV2 },
-    "v2",
-    "v1",
-  );
+  const multiKeyService = createConfiguredService({ v1: keyV1, v2: keyV2 }, "v2", "v1");
 
   assert.equal(multiKeyService.getEncryptedSecretKeyId(encrypted), "v2");
-  assert.throws(
-    () => multiKeyService.decryptSecret(encrypted),
-    /Unable to decrypt MFA secret/,
-  );
+  assert.throws(() => multiKeyService.decryptSecret(encrypted), /Unable to decrypt MFA secret/);
 });
 
 test("Malformed versioned envelope headers are rejected", () => {
@@ -355,11 +307,7 @@ test("MFA encryption key must be a valid base64-encoded 32-byte key", () => {
   const original = process.env.MFA_ENCRYPTION_KEY;
 
   try {
-    for (const invalidKey of [
-      "",
-      "not-base64",
-      randomBytes(16).toString("base64"),
-    ]) {
+    for (const invalidKey of ["", "not-base64", randomBytes(16).toString("base64")]) {
       process.env.MFA_ENCRYPTION_KEY = invalidKey;
 
       assert.throws(() => new MfaCryptoService(), /MFA/);
@@ -380,15 +328,9 @@ test("MFA keyring rejects ambiguous and malformed configuration", () => {
     /must not be configured alongside/,
   );
 
-  assertInvalidKeyringConfiguration(
-    { keyring: "{", },
-    /valid JSON keyring/,
-  );
+  assertInvalidKeyringConfiguration({ keyring: "{" }, /valid JSON keyring/);
 
-  assertInvalidKeyringConfiguration(
-    { keyring: "[]", },
-    /JSON object/,
-  );
+  assertInvalidKeyringConfiguration({ keyring: "[]" }, /JSON object/);
 
   assertInvalidKeyringConfiguration(
     {

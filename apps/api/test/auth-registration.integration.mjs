@@ -27,6 +27,7 @@ const resendDeliveryFailureEmail = `${randomUUID()}@example.invalid`;
 const concurrentResendEmail = `${randomUUID()}@example.invalid`;
 
 const verificationResendRaceEmail = `${randomUUID()}@example.invalid`;
+const passwordResetEmail = `${randomUUID()}@example.invalid`;
 
 const fixtureEmails = [
   successfulEmail,
@@ -40,6 +41,7 @@ const fixtureEmails = [
   resendDeliveryFailureEmail,
   concurrentResendEmail,
   verificationResendRaceEmail,
+  passwordResetEmail,
 ];
 
 const registrationResponse = {
@@ -57,6 +59,7 @@ let deliveryFailure = false;
 let blockedRateLimit = null;
 
 const deliveryAttempts = [];
+const passwordResetDeliveryAttempts = [];
 const rateLimitCalls = [];
 
 const rateLimitProvider = {
@@ -83,6 +86,10 @@ const emailProvider = {
       throw new Error("Simulated email delivery failure");
     }
   },
+  async sendPasswordResetEmail(email, resetUrl) {
+    passwordResetDeliveryAttempts.push({ email, resetUrl });
+    if (deliveryFailure) throw new Error("Simulated email delivery failure");
+  },
 };
 
 function hashToken(token) {
@@ -105,7 +112,7 @@ before(async () => {
   );
 
   assert.equal(migrationIdentity.rows[0].role, "serviceflow_migrator");
-  assert.equal(migrationIdentity.rows[0].database, "serviceflow_dev");
+  assert.equal(migrationIdentity.rows[0].database, "serviceflow_test");
 
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
@@ -152,15 +159,18 @@ before(async () => {
   `;
 
   assert.equal(appIdentity[0].role, "serviceflow_app");
-  assert.equal(appIdentity[0].database, "serviceflow_dev");
+  assert.equal(appIdentity[0].database, "serviceflow_test");
 });
 
 after(async () => {
   try {
     if (migrator) {
-      await migrator.query(`DELETE FROM users WHERE email_normalized = ANY($1::text[])`, [
-        fixtureEmails,
-      ]);
+      await migrator.query(
+        `DELETE FROM users
+         WHERE email_normalized = ANY($1::text[])
+           AND id NOT IN (SELECT actor_user_id FROM audit_events WHERE actor_user_id IS NOT NULL)`,
+        [fixtureEmails],
+      );
     }
   } finally {
     if (app) {
@@ -968,5 +978,159 @@ test("HTTP authentication routes enforce IP and identity rate limits", async () 
   } finally {
     blockedRateLimit = null;
     rateLimitCalls.length = 0;
+  }
+});
+
+test("Password reset is generic, single-use, expires, revokes sessions, and replaces the password", async () => {
+  const oldPassword = "password-reset-old-password";
+  const newPassword = "password-reset-new-password";
+  await auth.register({ email: passwordResetEmail, password: oldPassword });
+  const verificationDelivery = deliveryAttempts.findLast(
+    (item) => item.email === passwordResetEmail,
+  );
+  assert.ok(verificationDelivery);
+  await auth.verifyEmail(new URL(verificationDelivery.verificationUrl).searchParams.get("token"));
+
+  const unknown = await auth.requestPasswordReset(`${randomUUID()}@example.invalid`);
+  assert.deepEqual(unknown, await auth.requestPasswordReset(passwordResetEmail));
+  const resetDelivery = passwordResetDeliveryAttempts.findLast(
+    (item) => item.email === passwordResetEmail,
+  );
+  assert.ok(resetDelivery);
+  const resetToken = new URL(resetDelivery.resetUrl).searchParams.get("token");
+  assert.match(resetToken, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(new URL(resetDelivery.resetUrl).pathname, "/reset-password");
+
+  const row = await migrator.query(
+    `SELECT id, token_hash, expires_at, consumed_at FROM password_reset_tokens
+     WHERE user_id = (SELECT id FROM users WHERE email_normalized = $1)`,
+    [passwordResetEmail],
+  );
+  assert.equal(row.rowCount, 1);
+  assert.equal(row.rows[0].token_hash, hashToken(resetToken));
+  assert.equal(row.rows[0].consumed_at, null);
+  assert.ok(new Date(row.rows[0].expires_at).getTime() - Date.now() <= 30 * 60 * 1000);
+
+  const loggedIn = await auth.login({ email: passwordResetEmail, password: oldPassword });
+  assert.equal(loggedIn.kind, "SESSION");
+  await auth.confirmPasswordReset(resetToken, newPassword);
+  assert.deepEqual(await auth.confirmPasswordReset(resetToken, "another-password-reset-pass"), {
+    message:
+      "If the password reset link is valid, the password has been reset. Sign in with your new password.",
+  });
+  await assert.rejects(auth.login({ email: passwordResetEmail, password: oldPassword }));
+  assert.equal(
+    (await auth.login({ email: passwordResetEmail, password: newPassword })).kind,
+    "SESSION",
+  );
+
+  const session = await migrator.query(
+    "SELECT revoked_at FROM auth_sessions WHERE user_id = (SELECT id FROM users WHERE email_normalized = $1) ORDER BY created_at",
+    [passwordResetEmail],
+  );
+  assert.ok(session.rows.length >= 1);
+  assert.equal(session.rows.length, 2);
+  assert.ok(session.rows[0].revoked_at, "password reset revokes sessions that predate it");
+  assert.equal(session.rows[1].revoked_at, null, "a later login creates a fresh session");
+
+  await auth.requestPasswordReset(passwordResetEmail);
+  const expiredDelivery = passwordResetDeliveryAttempts.findLast(
+    (item) => item.email === passwordResetEmail,
+  );
+  const expiredToken = new URL(expiredDelivery.resetUrl).searchParams.get("token");
+  await migrator.query(
+    `UPDATE password_reset_tokens
+     SET created_at = now() - interval '2 seconds', expires_at = now() - interval '1 second'
+     WHERE token_hash = $1`,
+    [hashToken(expiredToken)],
+  );
+  assert.deepEqual(await auth.confirmPasswordReset(expiredToken, "expired-reset-password-value"), {
+    message:
+      "If the password reset link is valid, the password has been reset. Sign in with your new password.",
+  });
+  await assert.rejects(
+    auth.login({ email: passwordResetEmail, password: "expired-reset-password-value" }),
+  );
+
+  deliveryFailure = true;
+  try {
+    assert.deepEqual(await auth.requestPasswordReset(passwordResetEmail), {
+      message:
+        "If the account is eligible, password reset instructions will be sent to the provided email address.",
+    });
+  } finally {
+    deliveryFailure = false;
+  }
+});
+
+test("HTTP password-reset endpoints require the frontend origin and apply rate limits", async () => {
+  const endpoint = `${apiBaseUrl}/api/v1/auth/password-reset/request`;
+  const body = { email: `${randomUUID()}@example.invalid` };
+  const rejectedOrigin = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: "https://attacker.invalid" },
+    body: JSON.stringify(body),
+  });
+  assert.equal(rejectedOrigin.status, 403);
+
+  rateLimitCalls.length = 0;
+  blockedRateLimit = { operation: "password-reset-request", dimension: "email" };
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: new URL(process.env.WEB_APP_URL).origin,
+      },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get("retry-after"), "42");
+    assert.deepEqual(
+      rateLimitCalls.map(({ operation, dimension }) => ({ operation, dimension })),
+      [
+        { operation: "password-reset-request", dimension: "ip" },
+        { operation: "password-reset-request", dimension: "email" },
+      ],
+    );
+  } finally {
+    blockedRateLimit = null;
+    rateLimitCalls.length = 0;
+  }
+
+  const confirmationEndpoint = `${apiBaseUrl}/api/v1/auth/password-reset/confirm`;
+  for (const dimension of ["ip", "token"]) {
+    rateLimitCalls.length = 0;
+    blockedRateLimit = { operation: "password-reset-confirm", dimension };
+    try {
+      const response = await fetch(confirmationEndpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: new URL(process.env.WEB_APP_URL).origin,
+        },
+        body: JSON.stringify({ token: "A".repeat(43), newPassword: "new-password-valid" }),
+      });
+      assert.equal(response.status, 429);
+      assert.equal(response.headers.get("retry-after"), "42");
+      assert.deepEqual(
+        rateLimitCalls.map(({ operation, dimension: checkedDimension }) => ({
+          operation,
+          dimension: checkedDimension,
+        })),
+        dimension === "ip"
+          ? [{ operation: "password-reset-confirm", dimension: "ip" }]
+          : [
+              { operation: "password-reset-confirm", dimension: "ip" },
+              { operation: "password-reset-confirm", dimension: "token" },
+            ],
+      );
+      if (dimension === "token") {
+        assert.equal(rateLimitCalls.at(-1).identifier, hashToken("A".repeat(43)));
+      }
+    } finally {
+      blockedRateLimit = null;
+      rateLimitCalls.length = 0;
+    }
   }
 });

@@ -9,7 +9,13 @@
   "scripts": {
     "check:runtime": "node scripts/check-runtime.mjs",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "typecheck": "corepack pnpm --recursive --if-present typecheck",
+    "test:unit": "corepack pnpm --filter @serviceflow/api test:unit",
+    "test:integration": "corepack pnpm --filter @serviceflow/api build && corepack pnpm --filter @serviceflow/api test:integration",
+    "test": "corepack pnpm test:unit",
+    "build": "corepack pnpm --filter @serviceflow/api build && corepack pnpm --filter @serviceflow/web build",
+    "ci:check": "corepack pnpm format:check && corepack pnpm typecheck && corepack pnpm test:unit && corepack pnpm build"
   },
   "devDependencies": {
     "prettier": "3.10.1",

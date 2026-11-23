@@ -109,7 +109,7 @@ before(async () => {
   );
 
   assert.equal(migrationIdentity.rows[0].role, "serviceflow_migrator");
-  assert.equal(migrationIdentity.rows[0].database, "serviceflow_dev");
+  assert.equal(migrationIdentity.rows[0].database, "serviceflow_test");
 
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
@@ -155,7 +155,7 @@ before(async () => {
   `;
 
   assert.equal(appIdentity[0].role, "serviceflow_app");
-  assert.equal(appIdentity[0].database, "serviceflow_dev");
+  assert.equal(appIdentity[0].database, "serviceflow_test");
 
   await createUser(users.applicant);
   await createUser(users.other);

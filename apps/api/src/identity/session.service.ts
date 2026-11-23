@@ -63,8 +63,7 @@ export class SessionService {
         throw new UnauthorizedException("An active user is required to create a session.");
       }
 
-      const isPlatformAdministrator =
-        await hasActivePlatformAdministrator(tx, userId);
+      const isPlatformAdministrator = await hasActivePlatformAdministrator(tx, userId);
       const mfa = await tx.userMfa.findUnique({
         where: { userId },
         select: { status: true },
@@ -103,8 +102,7 @@ export class SessionService {
       throw new UnauthorizedException("An active user is required to create a session.");
     }
 
-    const isPlatformAdministrator =
-      await hasActivePlatformAdministrator(tx, userId);
+    const isPlatformAdministrator = await hasActivePlatformAdministrator(tx, userId);
     const mfa = await tx.userMfa.findUnique({
       where: { userId },
       select: { status: true },
@@ -216,8 +214,7 @@ export class SessionService {
           return null;
         }
 
-        const isPlatformAdministrator =
-          await hasActivePlatformAdministrator(tx, candidate.userId);
+        const isPlatformAdministrator = await hasActivePlatformAdministrator(tx, candidate.userId);
         const mfa = await tx.userMfa.findUnique({
           where: { userId: candidate.userId },
           select: { status: true, enabledAt: true },
@@ -317,8 +314,7 @@ export class SessionService {
           return null;
         }
 
-        const isPlatformAdministrator =
-          await hasActivePlatformAdministrator(tx, candidate.userId);
+        const isPlatformAdministrator = await hasActivePlatformAdministrator(tx, candidate.userId);
         const mfa = await tx.userMfa.findUnique({
           where: { userId: candidate.userId },
           select: { status: true, enabledAt: true },

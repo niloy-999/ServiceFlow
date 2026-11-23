@@ -21,11 +21,7 @@ export class MfaChallengeService {
     private readonly auditService: AuditService,
   ) {}
 
-  async verify(
-    challengeToken: string,
-    code: string,
-    userAgent?: string,
-  ): Promise<CreatedSession> {
+  async verify(challengeToken: string, code: string, userAgent?: string): Promise<CreatedSession> {
     if (
       typeof challengeToken !== "string" ||
       !/^[A-Za-z0-9_-]{43}$/.test(challengeToken) ||
@@ -96,12 +92,7 @@ export class MfaChallengeService {
           },
         });
 
-        if (
-          !mfa ||
-          mfa.status !== "ENABLED" ||
-          !mfa.enabledAt ||
-          mfa.enabledAt > now
-        ) {
+        if (!mfa || mfa.status !== "ENABLED" || !mfa.enabledAt || mfa.enabledAt > now) {
           throw new UnauthorizedException(INVALID_MFA_RESPONSE);
         }
 
@@ -109,11 +100,7 @@ export class MfaChallengeService {
 
         if (/^\d{6}$/.test(code)) {
           const secret = this.mfaCrypto.decryptSecret(Buffer.from(mfa.encryptedSecret));
-          const matchedStep = this.mfaCrypto.verifyTotpCode(
-            secret,
-            code,
-            now.getTime(),
-          );
+          const matchedStep = this.mfaCrypto.verifyTotpCode(secret, code, now.getTime());
 
           if (matchedStep !== null) {
             const updatedRows = await tx.$queryRaw<Array<{ user_id: string }>>`
@@ -168,11 +155,7 @@ export class MfaChallengeService {
         }
 
         if (!factorAccepted) {
-          await this.auditService.recordMfaVerificationFailure(
-            tx,
-            candidate.userId,
-            challenge.id,
-          );
+          await this.auditService.recordMfaVerificationFailure(tx, candidate.userId, challenge.id);
           return { kind: "INVALID" as const };
         }
 

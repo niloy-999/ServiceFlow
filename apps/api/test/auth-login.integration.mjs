@@ -117,7 +117,7 @@ before(async () => {
     "SELECT current_user AS role, current_database() AS database",
   );
   assert.equal(identity.rows[0].role, "serviceflow_migrator");
-  assert.equal(identity.rows[0].database, "serviceflow_dev");
+  assert.equal(identity.rows[0].database, "serviceflow_test");
 
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
@@ -162,7 +162,7 @@ before(async () => {
   `;
 
   assert.equal(appIdentity[0].role, "serviceflow_app");
-  assert.equal(appIdentity[0].database, "serviceflow_dev");
+  assert.equal(appIdentity[0].database, "serviceflow_test");
 
   await createUser(users.login);
   await createUser(users.unverified, { verified: false });
@@ -298,22 +298,10 @@ test("Active platform administrators without MFA cannot log in or receive a sess
     assert.equal(stored.rows[0].total, 0);
   } finally {
     if (adminUserId) {
-      await migrator.query(
-        "DELETE FROM platform_administrators WHERE user_id = $1",
-        [adminUserId],
-      );
-      await migrator.query(
-        "DELETE FROM auth_sessions WHERE user_id = $1",
-        [adminUserId],
-      );
-      await migrator.query(
-        "DELETE FROM user_mfa WHERE user_id = $1",
-        [adminUserId],
-      );
-      await migrator.query(
-        "DELETE FROM users WHERE id = $1",
-        [adminUserId],
-      );
+      await migrator.query("DELETE FROM platform_administrators WHERE user_id = $1", [adminUserId]);
+      await migrator.query("DELETE FROM auth_sessions WHERE user_id = $1", [adminUserId]);
+      await migrator.query("DELETE FROM user_mfa WHERE user_id = $1", [adminUserId]);
+      await migrator.query("DELETE FROM users WHERE id = $1", [adminUserId]);
     }
   }
 });

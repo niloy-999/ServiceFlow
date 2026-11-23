@@ -4,8 +4,7 @@ import { Prisma } from "../generated/prisma/client.js";
 
 import { PrismaService } from "./prisma.service.js";
 
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
@@ -34,9 +33,7 @@ export class GlobalIdentityContextService {
     }
 
     if (!userId && !challengeTokenHash) {
-      throw new BadRequestException(
-        "A user ID or MFA challenge hash is required.",
-      );
+      throw new BadRequestException("A user ID or MFA challenge hash is required.");
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -60,10 +57,7 @@ export class GlobalIdentityContextService {
     });
   }
 
-  async setUserContext(
-    tx: Prisma.TransactionClient,
-    userId: string,
-  ): Promise<void> {
+  async setUserContext(tx: Prisma.TransactionClient, userId: string): Promise<void> {
     if (!UUID_PATTERN.test(userId)) {
       throw new BadRequestException("A valid user ID is required.");
     }

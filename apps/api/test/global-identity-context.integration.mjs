@@ -39,16 +39,27 @@ async function createFixtures() {
   await migrator.query("BEGIN");
 
   try {
-    for (const [id, suffix] of [[userA, "A"], [userB, "B"]]) {
+    for (const [id, suffix] of [
+      [userA, "A"],
+      [userB, "B"],
+    ]) {
       await migrator.query(
         `INSERT INTO users
           (id, email_normalized, password_hash, display_name, updated_at)
          VALUES ($1, $2, $3, $4, NOW())`,
-        [id, `${id}@example.invalid`, "test-only-not-a-real-password-hash", `MFA Test User ${suffix}`],
+        [
+          id,
+          `${id}@example.invalid`,
+          "test-only-not-a-real-password-hash",
+          `MFA Test User ${suffix}`,
+        ],
       );
     }
 
-    for (const [id, userId] of [[mfaIdA, userA], [mfaIdB, userB]]) {
+    for (const [id, userId] of [
+      [mfaIdA, userA],
+      [mfaIdB, userB],
+    ]) {
       await migrator.query(
         `INSERT INTO user_mfa
           (id, user_id, encrypted_secret, status, enabled_at, updated_at)
@@ -91,22 +102,14 @@ async function cleanupFixtures() {
   await migrator.query("BEGIN");
 
   try {
-    await migrator.query(
-      "DELETE FROM mfa_challenges WHERE user_id = ANY($1::uuid[])",
-      [[userA, userB]],
-    );
-    await migrator.query(
-      "DELETE FROM mfa_recovery_codes WHERE user_id = ANY($1::uuid[])",
-      [[userA, userB]],
-    );
-    await migrator.query(
-      "DELETE FROM user_mfa WHERE user_id = ANY($1::uuid[])",
-      [[userA, userB]],
-    );
-    await migrator.query(
-      "DELETE FROM users WHERE id = ANY($1::uuid[])",
-      [[userA, userB]],
-    );
+    await migrator.query("DELETE FROM mfa_challenges WHERE user_id = ANY($1::uuid[])", [
+      [userA, userB],
+    ]);
+    await migrator.query("DELETE FROM mfa_recovery_codes WHERE user_id = ANY($1::uuid[])", [
+      [userA, userB],
+    ]);
+    await migrator.query("DELETE FROM user_mfa WHERE user_id = ANY($1::uuid[])", [[userA, userB]]);
+    await migrator.query("DELETE FROM users WHERE id = ANY($1::uuid[])", [[userA, userB]]);
     await migrator.query("COMMIT");
   } catch (error) {
     await migrator.query("ROLLBACK");
@@ -125,7 +128,7 @@ before(async () => {
     "SELECT current_user AS role, current_database() AS database",
   );
   assert.equal(migrationIdentity.rows[0].role, "serviceflow_migrator");
-  assert.equal(migrationIdentity.rows[0].database, "serviceflow_dev");
+  assert.equal(migrationIdentity.rows[0].database, "serviceflow_test");
 
   app = await NestFactory.createApplicationContext(AppModule, { logger: false });
   prisma = app.get(PrismaService);
@@ -135,7 +138,7 @@ before(async () => {
     SELECT current_user AS role, current_database() AS database
   `;
   assert.equal(appIdentity[0].role, "serviceflow_app");
-  assert.equal(appIdentity[0].database, "serviceflow_dev");
+  assert.equal(appIdentity[0].database, "serviceflow_test");
 
   await createFixtures();
   fixturesCreated = true;
@@ -161,8 +164,14 @@ test("Global identity context isolates MFA configuration and recovery codes by u
       SELECT user_id FROM mfa_recovery_codes ORDER BY user_id
     `;
 
-    assert.deepEqual(mfaRows.map((row) => row.user_id), [userA]);
-    assert.deepEqual(recoveryRows.map((row) => row.user_id), [userA]);
+    assert.deepEqual(
+      mfaRows.map((row) => row.user_id),
+      [userA],
+    );
+    assert.deepEqual(
+      recoveryRows.map((row) => row.user_id),
+      [userA],
+    );
   });
 
   await identityContext.withGlobalIdentityContext({ userId: userB }, async (tx) => {
@@ -173,8 +182,14 @@ test("Global identity context isolates MFA configuration and recovery codes by u
       SELECT user_id FROM mfa_recovery_codes ORDER BY user_id
     `;
 
-    assert.deepEqual(mfaRows.map((row) => row.user_id), [userB]);
-    assert.deepEqual(recoveryRows.map((row) => row.user_id), [userB]);
+    assert.deepEqual(
+      mfaRows.map((row) => row.user_id),
+      [userB],
+    );
+    assert.deepEqual(
+      recoveryRows.map((row) => row.user_id),
+      [userB],
+    );
   });
 });
 
@@ -267,7 +282,10 @@ test("Global identity settings do not leak outside their transaction", async () 
   `;
 
   for (const value of Object.values(outside[0])) {
-    assert.ok(value == null || value === "", "Identity settings must not persist outside the transaction");
+    assert.ok(
+      value == null || value === "",
+      "Identity settings must not persist outside the transaction",
+    );
   }
 });
 
@@ -278,7 +296,10 @@ test("Global identity context rejects malformed or empty identity options", asyn
   );
 
   await assert.rejects(
-    identityContext.withGlobalIdentityContext({ challengeTokenHash: "not-a-sha256-hash" }, async () => {}),
+    identityContext.withGlobalIdentityContext(
+      { challengeTokenHash: "not-a-sha256-hash" },
+      async () => {},
+    ),
     (error) => error?.getStatus?.() === 400,
   );
 

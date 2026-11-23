@@ -6,15 +6,7 @@ import { GlobalIdentityContextService } from "./global-identity-context.service.
 
 @Global()
 @Module({
-  providers: [
-    PrismaService,
-    TenantContextService,
-    GlobalIdentityContextService,
-  ],
-  exports: [
-    PrismaService,
-    TenantContextService,
-    GlobalIdentityContextService,
-  ],
+  providers: [PrismaService, TenantContextService, GlobalIdentityContextService],
+  exports: [PrismaService, TenantContextService, GlobalIdentityContextService],
 })
 export class PrismaModule {}

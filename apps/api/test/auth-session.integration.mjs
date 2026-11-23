@@ -29,31 +29,19 @@ async function enableMfa(enabledAt) {
   );
 }
 
-async function createPlatformAdministrator({
-  status = "ACTIVE",
-  revoked = false,
-} = {}) {
+async function createPlatformAdministrator({ status = "ACTIVE", revoked = false } = {}) {
   await migrator.query(
     `INSERT INTO platform_administrators (
        id, user_id, role, status,
        revoked_by_user_id, revoked_at, updated_at
      )
      VALUES ($1, $2, 'PLATFORM_ADMIN', $3, $4, $5, NOW())`,
-    [
-      randomUUID(),
-      userId,
-      status,
-      revoked ? userId : null,
-      revoked ? new Date() : null,
-    ],
+    [randomUUID(), userId, status, revoked ? userId : null, revoked ? new Date() : null],
   );
 }
 
 async function deletePlatformAdministrator() {
-  await migrator.query(
-    "DELETE FROM platform_administrators WHERE user_id = $1",
-    [userId],
-  );
+  await migrator.query("DELETE FROM platform_administrators WHERE user_id = $1", [userId]);
 }
 
 before(async () => {
@@ -69,7 +57,7 @@ before(async () => {
     "SELECT current_user AS role, current_database() AS database",
   );
   assert.equal(identity.rows[0].role, "serviceflow_migrator");
-  assert.equal(identity.rows[0].database, "serviceflow_dev");
+  assert.equal(identity.rows[0].database, "serviceflow_test");
 
   app = await NestFactory.createApplicationContext(AppModule, {
     logger: false,
@@ -82,7 +70,7 @@ before(async () => {
     SELECT current_user AS role, current_database() AS database
   `;
   assert.equal(appIdentity[0].role, "serviceflow_app");
-  assert.equal(appIdentity[0].database, "serviceflow_dev");
+  assert.equal(appIdentity[0].database, "serviceflow_test");
 
   await migrator.query(
     `INSERT INTO users
@@ -99,10 +87,7 @@ after(async () => {
     if (migrator && fixturesCreated) {
       await migrator.query("BEGIN");
       try {
-        await migrator.query(
-          "DELETE FROM platform_administrators WHERE user_id = $1",
-          [userId],
-        );
+        await migrator.query("DELETE FROM platform_administrators WHERE user_id = $1", [userId]);
         await migrator.query("DELETE FROM user_mfa WHERE user_id = $1", [userId]);
         await migrator.query("DELETE FROM auth_sessions WHERE user_id = $1", [userId]);
         await migrator.query("DELETE FROM users WHERE id = $1", [userId]);
@@ -271,10 +256,7 @@ test("MFA-enabled users cannot create password-only sessions", async () => {
   await enableMfa(enabledAt);
 
   try {
-    await assert.rejects(
-      sessions.createSession(userId),
-      (error) => error?.getStatus?.() === 401,
-    );
+    await assert.rejects(sessions.createSession(userId), (error) => error?.getStatus?.() === 401);
 
     const after = await migrator.query(
       "SELECT count(*)::int AS total FROM auth_sessions WHERE user_id = $1",
@@ -296,10 +278,7 @@ test("Active platform administrators cannot create password-only sessions", asyn
   await createPlatformAdministrator();
 
   try {
-    await assert.rejects(
-      sessions.createSession(userId),
-      (error) => error?.getStatus?.() === 401,
-    );
+    await assert.rejects(sessions.createSession(userId), (error) => error?.getStatus?.() === 401);
 
     const after = await migrator.query(
       "SELECT count(*)::int AS total FROM auth_sessions WHERE user_id = $1",
@@ -380,10 +359,7 @@ test("Active platform administrators cannot use old MFA sessions after MFA is di
       [enabledAt, hashToken(original.token)],
     );
 
-    await migrator.query(
-      "UPDATE user_mfa SET status = 'DISABLED' WHERE user_id = $1",
-      [userId],
-    );
+    await migrator.query("UPDATE user_mfa SET status = 'DISABLED' WHERE user_id = $1", [userId]);
 
     await createPlatformAdministrator();
 
@@ -464,10 +440,7 @@ test("MFA session rotation rejects unverified sessions and preserves verified ti
       [hashToken(replacement.token)],
     );
 
-    assert.equal(
-      new Date(stored.rows[0].mfa_verified_at).getTime(),
-      enabledAt.getTime(),
-    );
+    assert.equal(new Date(stored.rows[0].mfa_verified_at).getTime(), enabledAt.getTime());
 
     assert.ok(await sessions.validateSession(replacement.token));
   } finally {

@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Format, typecheck, unit tests, and builds
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://serviceflow_app:ci-placeholder@127.0.0.1:5432/serviceflow_test?schema=public
+      MIGRATION_DATABASE_URL: postgresql://serviceflow_migrator:ci-placeholder@127.0.0.1:5432/serviceflow_test?schema=public
+      SHADOW_DATABASE_URL: postgresql://serviceflow_migrator:ci-placeholder@127.0.0.1:5432/serviceflow_shadow?schema=public
+      WEB_APP_URL: http://localhost:3000
+      CSRF_HMAC_SECRET: 0000000000000000000000000000000000000000000000000000000000000000
+      RATE_LIMIT_HMAC_SECRET: 1111111111111111111111111111111111111111111111111111111111111111
+      MFA_ENCRYPTION_KEYS: '{"ci-v1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'
+      MFA_ENCRYPTION_LEGACY_KEY_ID: ci-v1
+      MFA_ENCRYPTION_ACTIVE_KEY_ID: ci-v1
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Activate locked pnpm
+        run: corepack prepare pnpm@10.34.9 --activate
+      - name: Install from lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Check formatting
+        run: pnpm format:check
+      - name: TypeScript checks
+        run: pnpm typecheck
+      - name: Unit tests
+        run: pnpm test:unit
+      - name: Build applications
+        run: pnpm build
+
+  postgres-integration:
+    name: PostgreSQL migrations and integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.12-alpine3.24
+        env:
+          POSTGRES_USER: serviceflow_bootstrap
+          POSTGRES_PASSWORD: ci-bootstrap-password
+          POSTGRES_DB: serviceflow_bootstrap
+          POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U serviceflow_bootstrap -d serviceflow_bootstrap"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://serviceflow_app:pending@127.0.0.1:5432/serviceflow_test?schema=public
+      MIGRATION_DATABASE_URL: postgresql://serviceflow_migrator:pending@127.0.0.1:5432/serviceflow_test?schema=public
+      SHADOW_DATABASE_URL: postgresql://serviceflow_migrator:pending@127.0.0.1:5432/serviceflow_shadow?schema=public
+      WEB_APP_URL: http://localhost:3000
+      CSRF_HMAC_SECRET: 2222222222222222222222222222222222222222222222222222222222222222
+      RATE_LIMIT_HMAC_SECRET: 3333333333333333333333333333333333333333333333333333333333333333
+      EMAIL_DELIVERY: local
+      NODE_ENV: development
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Activate locked pnpm
+        run: corepack prepare pnpm@10.34.9 --activate
+      - name: Install from lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Create isolated test roles and databases
+        shell: bash
+        run: |
+          MIGRATION_PASSWORD_VALUE="$(openssl rand -hex 32)"
+          APP_PASSWORD_VALUE="$(openssl rand -hex 32)"
+          psql "postgresql://serviceflow_bootstrap:ci-bootstrap-password@127.0.0.1:5432/serviceflow_bootstrap" \
+            --set=ON_ERROR_STOP=1 \
+            --set=app_password="$APP_PASSWORD_VALUE" \
+            --set=migrator_password="$MIGRATION_PASSWORD_VALUE" \
+            --file=infra/local/postgres/init/roles.sql
+          psql "postgresql://serviceflow_bootstrap:ci-bootstrap-password@127.0.0.1:5432/serviceflow_bootstrap" \
+            --set=ON_ERROR_STOP=1 \
+            --file=infra/local/postgres/init/databases.sql
+          {
+            printf 'DATABASE_URL=postgresql://serviceflow_app:%s@127.0.0.1:5432/serviceflow_test?schema=public\n' "$APP_PASSWORD_VALUE"
+            printf 'MIGRATION_DATABASE_URL=postgresql://serviceflow_migrator:%s@127.0.0.1:5432/serviceflow_test?schema=public\n' "$MIGRATION_PASSWORD_VALUE"
+            printf 'SHADOW_DATABASE_URL=postgresql://serviceflow_migrator:%s@127.0.0.1:5432/serviceflow_shadow?schema=public\n' "$MIGRATION_PASSWORD_VALUE"
+            printf 'MFA_ENCRYPTION_KEYS={"ci-v1":"%s"}\n' "$(openssl rand -base64 32)"
+            printf 'MFA_ENCRYPTION_LEGACY_KEY_ID=ci-v1\n'
+            printf 'MFA_ENCRYPTION_ACTIVE_KEY_ID=ci-v1\n'
+          } >> "$GITHUB_ENV"
+          printf '%s\n' 'Initialized isolated PostgreSQL test roles and databases.'
+      - name: Apply migrations to isolated test database
+        run: pnpm --filter @serviceflow/api db:migrate:deploy
+      - name: Run PostgreSQL integration tests
+        run: pnpm test:integration
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Scan repository history with redacted Gitleaks output
+        run: >-
+          docker run --rm
+          --volume "$GITHUB_WORKSPACE:/repo:ro"
+          ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb
+          git --redact --log-opts=--all /repo

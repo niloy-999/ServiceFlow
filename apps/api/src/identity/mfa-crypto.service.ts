@@ -35,9 +35,7 @@ export class MfaCryptoService {
 
     if (configuredKeyring !== undefined) {
       if (process.env.MFA_ENCRYPTION_KEY !== undefined) {
-        throw new Error(
-          "MFA_ENCRYPTION_KEY must not be configured alongside MFA_ENCRYPTION_KEYS.",
-        );
+        throw new Error("MFA_ENCRYPTION_KEY must not be configured alongside MFA_ENCRYPTION_KEYS.");
       }
 
       let parsed: unknown;
@@ -48,11 +46,7 @@ export class MfaCryptoService {
         throw new Error("MFA_ENCRYPTION_KEYS must be a valid JSON keyring.");
       }
 
-      if (
-        parsed === null ||
-        typeof parsed !== "object" ||
-        Array.isArray(parsed)
-      ) {
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("MFA_ENCRYPTION_KEYS must be a JSON object.");
       }
 
@@ -70,19 +64,13 @@ export class MfaCryptoService {
     }
 
     for (const [keyId, encodedKey] of keyEntries) {
-      if (
-        !/^[A-Za-z0-9_-]{1,32}$/.test(keyId) ||
-        typeof encodedKey !== "string"
-      ) {
+      if (!/^[A-Za-z0-9_-]{1,32}$/.test(keyId) || typeof encodedKey !== "string") {
         throw new Error("MFA encryption keyring contains an invalid entry.");
       }
 
       const decodedKey = Buffer.from(encodedKey, "base64");
 
-      if (
-        decodedKey.length !== 32 ||
-        decodedKey.toString("base64") !== encodedKey
-      ) {
+      if (decodedKey.length !== 32 || decodedKey.toString("base64") !== encodedKey) {
         throw new Error(
           `MFA encryption key "${keyId}" must be canonical base64 for a 32-byte key.`,
         );
@@ -232,10 +220,7 @@ export class MfaCryptoService {
 
     cipher.setAAD(header);
 
-    const ciphertext = Buffer.concat([
-      cipher.update(secret),
-      cipher.final(),
-    ]);
+    const ciphertext = Buffer.concat([cipher.update(secret), cipher.final()]);
 
     const authTag = cipher.getAuthTag();
 
@@ -268,17 +253,12 @@ export class MfaCryptoService {
     const version = encrypted[ENVELOPE_MAGIC.length]!;
     const keyIdLength = encrypted[ENVELOPE_MAGIC.length + 1]!;
 
-    if (
-      version !== ENVELOPE_VERSION ||
-      keyIdLength < 1 ||
-      keyIdLength > MAX_KEY_ID_LENGTH
-    ) {
+    if (version !== ENVELOPE_VERSION || keyIdLength < 1 || keyIdLength > MAX_KEY_ID_LENGTH) {
       throw new TypeError("Invalid MFA encryption envelope.");
     }
 
     const headerLength = fixedHeaderLength + keyIdLength;
-    const minimumLength =
-      headerLength + NONCE_LENGTH + AUTH_TAG_LENGTH + 1;
+    const minimumLength = headerLength + NONCE_LENGTH + AUTH_TAG_LENGTH + 1;
 
     if (encrypted.length < minimumLength) {
       throw new TypeError("Invalid MFA encryption envelope.");
@@ -287,10 +267,7 @@ export class MfaCryptoService {
     const keyIdBytes = encrypted.subarray(fixedHeaderLength, headerLength);
     const keyId = keyIdBytes.toString("ascii");
 
-    if (
-      !/^[A-Za-z0-9_-]{1,32}$/.test(keyId) ||
-      !Buffer.from(keyId, "ascii").equals(keyIdBytes)
-    ) {
+    if (!/^[A-Za-z0-9_-]{1,32}$/.test(keyId) || !Buffer.from(keyId, "ascii").equals(keyIdBytes)) {
       throw new TypeError("Invalid MFA encryption envelope.");
     }
 
@@ -320,36 +297,22 @@ export class MfaCryptoService {
       if (isLegacy) {
         header = Buffer.alloc(0);
         nonce = encrypted.subarray(0, NONCE_LENGTH);
-        authTag = encrypted.subarray(
-          NONCE_LENGTH,
-          NONCE_LENGTH + AUTH_TAG_LENGTH,
-        );
-        ciphertext = encrypted.subarray(
-          NONCE_LENGTH + AUTH_TAG_LENGTH,
-        );
+        authTag = encrypted.subarray(NONCE_LENGTH, NONCE_LENGTH + AUTH_TAG_LENGTH);
+        ciphertext = encrypted.subarray(NONCE_LENGTH + AUTH_TAG_LENGTH);
       } else {
         const keyIdLength = encrypted[ENVELOPE_MAGIC.length + 1]!;
         const headerLength = ENVELOPE_MAGIC.length + 2 + keyIdLength;
 
         header = encrypted.subarray(0, headerLength);
-        nonce = encrypted.subarray(
-          headerLength,
-          headerLength + NONCE_LENGTH,
-        );
+        nonce = encrypted.subarray(headerLength, headerLength + NONCE_LENGTH);
         authTag = encrypted.subarray(
           headerLength + NONCE_LENGTH,
           headerLength + NONCE_LENGTH + AUTH_TAG_LENGTH,
         );
-        ciphertext = encrypted.subarray(
-          headerLength + NONCE_LENGTH + AUTH_TAG_LENGTH,
-        );
+        ciphertext = encrypted.subarray(headerLength + NONCE_LENGTH + AUTH_TAG_LENGTH);
       }
 
-      const decipher = createDecipheriv(
-        ENCRYPTION_ALGORITHM,
-        key,
-        nonce,
-      );
+      const decipher = createDecipheriv(ENCRYPTION_ALGORITHM, key, nonce);
 
       if (!isLegacy) {
         decipher.setAAD(header);
@@ -357,10 +320,7 @@ export class MfaCryptoService {
 
       decipher.setAuthTag(authTag);
 
-      return Buffer.concat([
-        decipher.update(ciphertext),
-        decipher.final(),
-      ]);
+      return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     } catch {
       throw new Error("Unable to decrypt MFA secret.");
     }

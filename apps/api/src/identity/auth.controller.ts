@@ -33,6 +33,8 @@ import { StartMfaEnrollmentDto } from "./dto/start-mfa-enrollment.dto.js";
 import { ConfirmMfaEnrollmentDto } from "./dto/confirm-mfa-enrollment.dto.js";
 import { RegenerateMfaRecoveryCodesDto } from "./dto/regenerate-mfa-recovery-codes.dto.js";
 import { DisableMfaDto } from "./dto/disable-mfa.dto.js";
+import { RequestPasswordResetDto } from "./dto/request-password-reset.dto.js";
+import { ConfirmPasswordResetDto } from "./dto/confirm-password-reset.dto.js";
 
 interface ClientRequest extends AuthenticatedRequest {
   socket: {
@@ -167,6 +169,44 @@ export class AuthController {
     return this.authService.resendVerification(input.email);
   }
 
+  @Post("password-reset/request")
+  @HttpCode(HttpStatus.OK)
+  async requestPasswordReset(
+    @Body() input: RequestPasswordResetDto,
+    @Req() request: ClientRequest,
+    @Res({ passthrough: true }) response: ResponseHeaders,
+  ) {
+    assertFrontendOrigin(request.headers.origin);
+    response.setHeader("Cache-Control", "no-store");
+    const ip = this.getClientIp(request);
+    await this.enforceLimit("password-reset-request", "ip", ip, 10, 60 * 60, response);
+    await this.enforceLimit(
+      "password-reset-request",
+      "email",
+      input.email.trim().toLowerCase(),
+      3,
+      60 * 60,
+      response,
+    );
+    return this.authService.requestPasswordReset(input.email);
+  }
+
+  @Post("password-reset/confirm")
+  @HttpCode(HttpStatus.OK)
+  async confirmPasswordReset(
+    @Body() input: ConfirmPasswordResetDto,
+    @Req() request: ClientRequest,
+    @Res({ passthrough: true }) response: ResponseHeaders,
+  ) {
+    assertFrontendOrigin(request.headers.origin);
+    response.setHeader("Cache-Control", "no-store");
+    const ip = this.getClientIp(request);
+    await this.enforceLimit("password-reset-confirm", "ip", ip, 20, 15 * 60, response);
+    const tokenHash = createHash("sha256").update(input.token).digest("hex");
+    await this.enforceLimit("password-reset-confirm", "token", tokenHash, 5, 15 * 60, response);
+    return this.authService.confirmPasswordReset(input.token, input.newPassword);
+  }
+
   @Post("login")
   @HttpCode(HttpStatus.OK)
   async login(
@@ -226,18 +266,9 @@ export class AuthController {
     const clientIp = this.getClientIp(request);
     await this.enforceLimit("mfa-verify", "ip", clientIp, 20, 15 * 60, response);
 
-    const challengeHash = createHash("sha256")
-      .update(input.challengeToken)
-      .digest("hex");
+    const challengeHash = createHash("sha256").update(input.challengeToken).digest("hex");
 
-    await this.enforceLimit(
-      "mfa-verify",
-      "challenge",
-      challengeHash,
-      5,
-      15 * 60,
-      response,
-    );
+    await this.enforceLimit("mfa-verify", "challenge", challengeHash, 5, 15 * 60, response);
 
     const userAgent = request.headers["user-agent"];
     const session = await this.mfaChallengeService.verify(
@@ -246,10 +277,7 @@ export class AuthController {
       typeof userAgent === "string" ? userAgent : undefined,
     );
 
-    response.setHeader(
-      "Set-Cookie",
-      createSessionCookie(session.token, session.expiresAt),
-    );
+    response.setHeader("Set-Cookie", createSessionCookie(session.token, session.expiresAt));
 
     return {
       csrfToken: this.csrfService.generateToken(session.token),
@@ -278,23 +306,9 @@ export class AuthController {
     const userId = request.authSession.userId;
     const clientIp = this.getClientIp(request);
 
-    await this.enforceLimit(
-      "mfa-enrollment-start",
-      "ip",
-      clientIp,
-      10,
-      15 * 60,
-      response,
-    );
+    await this.enforceLimit("mfa-enrollment-start", "ip", clientIp, 10, 15 * 60, response);
 
-    await this.enforceLimit(
-      "mfa-enrollment-start",
-      "user",
-      userId,
-      5,
-      15 * 60,
-      response,
-    );
+    await this.enforceLimit("mfa-enrollment-start", "user", userId, 5, 15 * 60, response);
 
     return this.mfaEnrollmentService.startEnrollment(userId, input.password);
   }
@@ -320,23 +334,9 @@ export class AuthController {
     const userId = request.authSession.userId;
     const clientIp = this.getClientIp(request);
 
-    await this.enforceLimit(
-      "mfa-enrollment-confirm",
-      "ip",
-      clientIp,
-      10,
-      15 * 60,
-      response,
-    );
+    await this.enforceLimit("mfa-enrollment-confirm", "ip", clientIp, 10, 15 * 60, response);
 
-    await this.enforceLimit(
-      "mfa-enrollment-confirm",
-      "user",
-      userId,
-      5,
-      15 * 60,
-      response,
-    );
+    await this.enforceLimit("mfa-enrollment-confirm", "user", userId, 5, 15 * 60, response);
 
     return this.mfaEnrollmentService.confirmEnrollment(
       userId,
@@ -366,23 +366,9 @@ export class AuthController {
     const userId = request.authSession.userId;
     const clientIp = this.getClientIp(request);
 
-    await this.enforceLimit(
-      "mfa-recovery-regenerate",
-      "ip",
-      clientIp,
-      10,
-      15 * 60,
-      response,
-    );
+    await this.enforceLimit("mfa-recovery-regenerate", "ip", clientIp, 10, 15 * 60, response);
 
-    await this.enforceLimit(
-      "mfa-recovery-regenerate",
-      "user",
-      userId,
-      5,
-      15 * 60,
-      response,
-    );
+    await this.enforceLimit("mfa-recovery-regenerate", "user", userId, 5, 15 * 60, response);
 
     return this.mfaEnrollmentService.regenerateRecoveryCodes(
       userId,
@@ -411,23 +397,9 @@ export class AuthController {
     const userId = request.authSession.userId;
     const clientIp = this.getClientIp(request);
 
-    await this.enforceLimit(
-      "mfa-disable",
-      "ip",
-      clientIp,
-      10,
-      15 * 60,
-      response,
-    );
+    await this.enforceLimit("mfa-disable", "ip", clientIp, 10, 15 * 60, response);
 
-    await this.enforceLimit(
-      "mfa-disable",
-      "user",
-      userId,
-      5,
-      15 * 60,
-      response,
-    );
+    await this.enforceLimit("mfa-disable", "user", userId, 5, 15 * 60, response);
 
     const result = await this.mfaEnrollmentService.disableMfa(
       userId,

@@ -45,4 +45,34 @@ export class EmailDeliveryService {
 
     await chmod(filePath, 0o600);
   }
+
+  async sendPasswordResetEmail(email: string, resetUrl: string): Promise<void> {
+    const mailDirectory = resolve(process.cwd(), ".local/mail");
+
+    await mkdir(mailDirectory, { recursive: true, mode: 0o700 });
+    await chmod(mailDirectory, 0o700);
+
+    const message = [
+      `To: ${email}`,
+      "Subject: Reset your ServiceFlow password",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Use this time-limited link to reset your ServiceFlow password:",
+      resetUrl,
+      "",
+      "If you did not request this, you can ignore this message.",
+      "The link can only be used once.",
+      "",
+    ].join("\n");
+
+    const filePath = resolve(mailDirectory, `${randomUUID()}.eml`);
+
+    await writeFile(filePath, message, {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+    });
+
+    await chmod(filePath, 0o600);
+  }
 }

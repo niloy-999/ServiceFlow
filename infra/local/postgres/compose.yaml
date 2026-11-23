@@ -1,0 +1,27 @@
+name: serviceflow-phase1
+
+services:
+  db:
+    image: postgres:17.12-alpine3.24
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: serviceflow_bootstrap
+      POSTGRES_PASSWORD: ${POSTGRES_BOOTSTRAP_PASSWORD:?Set POSTGRES_BOOTSTRAP_PASSWORD in .env.local}
+      POSTGRES_DB: serviceflow_bootstrap
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      SERVICEFLOW_APP_PASSWORD: ${SERVICEFLOW_APP_PASSWORD:?Set SERVICEFLOW_APP_PASSWORD in .env.local}
+      SERVICEFLOW_MIGRATOR_PASSWORD: ${SERVICEFLOW_MIGRATOR_PASSWORD:?Set SERVICEFLOW_MIGRATOR_PASSWORD in .env.local}
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-55432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U serviceflow_bootstrap -d serviceflow_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  postgres-data:
+    name: serviceflow-phase1-postgres-data

@@ -3,6 +3,7 @@ import "reflect-metadata";
 import { ValidationPipe } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { AppModule } from "./app.module.js";
+import { createApiLogger, getApiListenConfig } from "./config/runtime-config.js";
 
 function getFrontendOrigin(): string {
   const webAppUrl = process.env.WEB_APP_URL;
@@ -39,7 +40,8 @@ function getFrontendOrigin(): string {
 
 async function bootstrap() {
   const frontendOrigin = getFrontendOrigin();
-  const app = await NestFactory.create(AppModule);
+  const logger = createApiLogger();
+  const app = await NestFactory.create(AppModule, { logger });
 
   app.setGlobalPrefix("api/v1");
 
@@ -64,10 +66,10 @@ async function bootstrap() {
 
   app.enableShutdownHooks();
 
-  const port = Number(process.env.PORT ?? 3001);
-  await app.listen(port, "127.0.0.1");
+  const { host, port } = getApiListenConfig();
+  await app.listen(port, host);
 
-  console.log(`ServiceFlow API listening on port ${port}`);
+  logger.log({ event: "serviceflow_api_started", host, port });
 }
 
 void bootstrap();

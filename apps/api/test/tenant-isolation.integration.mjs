@@ -183,7 +183,9 @@ before(async () => {
   );
 
   assert.equal(migrationIdentity.rows[0].role, "serviceflow_migrator");
-  assert.equal(migrationIdentity.rows[0].database, "serviceflow_dev");
+  assert.equal(migrationIdentity.rows[0].database, "serviceflow_test");
+  const migrationTimezone = await migrator.query("SELECT current_setting('TimeZone') AS timezone");
+  assert.equal(migrationTimezone.rows[0].timezone, "UTC");
 
   app = await NestFactory.createApplicationContext(AppModule, {
     logger: false,
@@ -193,11 +195,13 @@ before(async () => {
   prisma = app.get(PrismaService);
 
   const appIdentity = await prisma.$queryRaw`
-    SELECT current_user AS role, current_database() AS database
+    SELECT current_user AS role, current_database() AS database,
+      current_setting('TimeZone') AS timezone
   `;
 
   assert.equal(appIdentity[0].role, "serviceflow_app");
-  assert.equal(appIdentity[0].database, "serviceflow_dev");
+  assert.equal(appIdentity[0].database, "serviceflow_test");
+  assert.equal(appIdentity[0].timezone, "UTC");
 
   await createFixtures();
   fixturesCreated = true;

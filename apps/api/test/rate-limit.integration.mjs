@@ -73,7 +73,7 @@ before(async () => {
   );
 
   assert.equal(identity.rows[0].role, "serviceflow_migrator");
-  assert.equal(identity.rows[0].database, "serviceflow_dev");
+  assert.equal(identity.rows[0].database, "serviceflow_test");
 
   app = await NestFactory.createApplicationContext(AppModule, {
     logger: false,
@@ -87,7 +87,7 @@ before(async () => {
   `;
 
   assert.equal(appIdentity[0].role, "serviceflow_app");
-  assert.equal(appIdentity[0].database, "serviceflow_dev");
+  assert.equal(appIdentity[0].database, "serviceflow_test");
 });
 
 after(async () => {

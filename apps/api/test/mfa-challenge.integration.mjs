@@ -101,9 +101,7 @@ before(async () => {
   assert.ok(process.env.MIGRATION_DATABASE_URL);
   assert.ok(process.env.WEB_APP_URL);
   assert.ok(process.env.CSRF_HMAC_SECRET);
-  assert.ok(
-    process.env.MFA_ENCRYPTION_KEYS || process.env.MFA_ENCRYPTION_KEY,
-  );
+  assert.ok(process.env.MFA_ENCRYPTION_KEYS || process.env.MFA_ENCRYPTION_KEY);
 
   migrator = new Client({
     connectionString: process.env.MIGRATION_DATABASE_URL,
@@ -114,7 +112,7 @@ before(async () => {
     "SELECT current_user AS role, current_database() AS database",
   );
   assert.equal(identity.rows[0].role, "serviceflow_migrator");
-  assert.equal(identity.rows[0].database, "serviceflow_dev");
+  assert.equal(identity.rows[0].database, "serviceflow_test");
 
   appClient = new Client({
     connectionString: process.env.DATABASE_URL,
@@ -125,7 +123,7 @@ before(async () => {
     "SELECT current_user AS role, current_database() AS database",
   );
   assert.equal(runtimeIdentity.rows[0].role, "serviceflow_app");
-  assert.equal(runtimeIdentity.rows[0].database, "serviceflow_dev");
+  assert.equal(runtimeIdentity.rows[0].database, "serviceflow_test");
 
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
@@ -160,7 +158,7 @@ before(async () => {
     SELECT current_user AS role, current_database() AS database
   `;
   assert.equal(appIdentity[0].role, "serviceflow_app");
-  assert.equal(appIdentity[0].database, "serviceflow_dev");
+  assert.equal(appIdentity[0].database, "serviceflow_test");
 
   const mfaPrivileges = await migrator.query(`
     SELECT
@@ -234,7 +232,6 @@ before(async () => {
   assert.equal(mfaPrivileges.rows[0].status_update, false);
   assert.equal(mfaPrivileges.rows[0].enabled_at_update, false);
 
-
   const passwordHash = await passwords.hashPassword(password);
   await migrator.query(
     `INSERT INTO users (
@@ -261,18 +258,11 @@ after(async () => {
       await migrator.query("BEGIN");
       try {
         // Test teardown only: temporarily disable audit immutability.
-        await migrator.query(
-          "ALTER TABLE audit_events DISABLE TRIGGER audit_events_immutable",
-        );
+        await migrator.query("ALTER TABLE audit_events DISABLE TRIGGER audit_events_immutable");
 
-        await migrator.query(
-          "DELETE FROM audit_events WHERE actor_user_id = $1",
-          [userId],
-        );
+        await migrator.query("DELETE FROM audit_events WHERE actor_user_id = $1", [userId]);
 
-        await migrator.query(
-          "ALTER TABLE audit_events ENABLE TRIGGER audit_events_immutable",
-        );
+        await migrator.query("ALTER TABLE audit_events ENABLE TRIGGER audit_events_immutable");
 
         await migrator.query("DELETE FROM mfa_challenges WHERE user_id = $1", [userId]);
         await migrator.query("DELETE FROM mfa_enrollments WHERE user_id = $1", [userId]);
@@ -309,11 +299,7 @@ test("Runtime database role cannot insert an enabled MFA configuration", async (
         `INSERT INTO user_mfa (
            id, user_id, encrypted_secret, updated_at, status, enabled_at
          ) VALUES ($1, $2, $3, NOW(), 'ENABLED', NOW())`,
-        [
-          randomUUID(),
-          candidateUserId,
-          Buffer.alloc(32),
-        ],
+        [randomUUID(), candidateUserId, Buffer.alloc(32)],
       ),
       (error) => error.code === "42501",
     );
@@ -337,11 +323,7 @@ test("Runtime database role cannot insert an MFA replay counter", async () => {
         `INSERT INTO user_mfa (
            id, user_id, encrypted_secret, updated_at, last_accepted_time_step
          ) VALUES ($1, $2, $3, NOW(), 123456)`,
-        [
-          randomUUID(),
-          candidateUserId,
-          Buffer.alloc(32),
-        ],
+        [randomUUID(), candidateUserId, Buffer.alloc(32)],
       ),
       (error) => error.code === "42501",
     );
@@ -393,10 +375,7 @@ test("MFA verification enforces IP and challenge rate limits before factor verif
     for (const scenario of scenarios) {
       const challengeToken = await createChallenge();
       const challengeHash = hashToken(challengeToken);
-      const code = mfaCrypto.generateTotpCode(
-        secret,
-        Math.floor(Date.now() / 30000),
-      );
+      const code = mfaCrypto.generateTotpCode(secret, Math.floor(Date.now() / 30000));
 
       rateLimitCalls.length = 0;
       blockedRateLimit = {
@@ -467,10 +446,7 @@ test("An expired MFA challenge is rejected without creating a session", async ()
     [userId],
   );
 
-  const code = mfaCrypto.generateTotpCode(
-    secret,
-    Math.floor(Date.now() / 30000),
-  );
+  const code = mfaCrypto.generateTotpCode(secret, Math.floor(Date.now() / 30000));
   const response = await verify(challengeToken, code);
 
   assert.equal(response.status, 401);
@@ -492,10 +468,7 @@ test("An expired MFA challenge is rejected without creating a session", async ()
 
 test("An unknown MFA challenge is rejected without creating a session", async () => {
   const unknownToken = "A".repeat(43);
-  const code = mfaCrypto.generateTotpCode(
-    secret,
-    Math.floor(Date.now() / 30000),
-  );
+  const code = mfaCrypto.generateTotpCode(secret, Math.floor(Date.now() / 30000));
 
   const sessionsBefore = await migrator.query(
     "SELECT count(*)::int AS total FROM auth_sessions WHERE user_id = $1",
@@ -517,29 +490,24 @@ test("An unknown MFA challenge is rejected without creating a session", async ()
 test("A suspended user cannot complete MFA verification", async () => {
   const challengeToken = await createChallenge();
   const tokenHash = hashToken(challengeToken);
-  const code = mfaCrypto.generateTotpCode(
-    secret,
-    Math.floor(Date.now() / 30000),
-  );
+  const code = mfaCrypto.generateTotpCode(secret, Math.floor(Date.now() / 30000));
 
   const sessionsBefore = await migrator.query(
     "SELECT count(*)::int AS total FROM auth_sessions WHERE user_id = $1",
     [userId],
   );
 
-  await migrator.query(
-    "UPDATE users SET status = 'SUSPENDED', updated_at = NOW() WHERE id = $1",
-    [userId],
-  );
+  await migrator.query("UPDATE users SET status = 'SUSPENDED', updated_at = NOW() WHERE id = $1", [
+    userId,
+  ]);
 
   let response;
   try {
     response = await verify(challengeToken, code);
   } finally {
-    await migrator.query(
-      "UPDATE users SET status = 'ACTIVE', updated_at = NOW() WHERE id = $1",
-      [userId],
-    );
+    await migrator.query("UPDATE users SET status = 'ACTIVE', updated_at = NOW() WHERE id = $1", [
+      userId,
+    ]);
   }
 
   assert.equal(response.status, 401);
@@ -561,10 +529,7 @@ test("A suspended user cannot complete MFA verification", async () => {
 
 test("A valid TOTP consumes the challenge and creates an MFA-verified session", async () => {
   const challengeToken = await createChallenge();
-  const code = mfaCrypto.generateTotpCode(
-    secret,
-    Math.floor(Date.now() / 30000),
-  );
+  const code = mfaCrypto.generateTotpCode(secret, Math.floor(Date.now() / 30000));
 
   const response = await verify(challengeToken, code);
 
@@ -639,11 +604,9 @@ test("A recovery code can be consumed only once", async () => {
 });
 
 test("Each failed MFA factor is audited without consuming the challenge", async () => {
-
-  await migrator.query(
-    "UPDATE user_mfa SET last_accepted_time_step = NULL WHERE user_id = $1",
-    [userId],
-  );
+  await migrator.query("UPDATE user_mfa SET last_accepted_time_step = NULL WHERE user_id = $1", [
+    userId,
+  ]);
 
   const challengeToken = await createChallenge();
   const tokenHash = hashToken(challengeToken);
@@ -684,10 +647,11 @@ test("Each failed MFA factor is audited without consuming the challenge", async 
        AND action = 'auth.mfa.challenge_verification_failed'
        AND target_type = 'MFA_CHALLENGE'
        AND outcome = 'FAILURE'`,
-    [userId, (await migrator.query(
-      "SELECT id FROM mfa_challenges WHERE token_hash = $1",
-      [tokenHash],
-    )).rows[0].id],
+    [
+      userId,
+      (await migrator.query("SELECT id FROM mfa_challenges WHERE token_hash = $1", [tokenHash]))
+        .rows[0].id,
+    ],
   );
   assert.equal(failureAudit.rows[0].total, 2);
 
@@ -695,15 +659,9 @@ test("Each failed MFA factor is audited without consuming the challenge", async 
     "SELECT count(*)::int AS total FROM auth_sessions WHERE user_id = $1",
     [userId],
   );
-  assert.equal(
-    sessionsAfterFailures.rows[0].total,
-    sessionsBefore.rows[0].total,
-  );
+  assert.equal(sessionsAfterFailures.rows[0].total, sessionsBefore.rows[0].total);
 
-  const validCode = mfaCrypto.generateTotpCode(
-    secret,
-    Math.floor(Date.now() / 30000),
-  );
+  const validCode = mfaCrypto.generateTotpCode(secret, Math.floor(Date.now() / 30000));
   const successfulResponse = await verify(challengeToken, validCode);
 
   assert.equal(successfulResponse.status, 200);
@@ -728,10 +686,9 @@ test("Each failed MFA factor is audited without consuming the challenge", async 
 });
 
 test("Concurrent verification of the same challenge creates exactly one session", async () => {
-  await migrator.query(
-    "UPDATE user_mfa SET last_accepted_time_step = NULL WHERE user_id = $1",
-    [userId],
-  );
+  await migrator.query("UPDATE user_mfa SET last_accepted_time_step = NULL WHERE user_id = $1", [
+    userId,
+  ]);
 
   const challengeToken = await createChallenge();
   const currentStep = Math.floor(Date.now() / 30000);
@@ -742,17 +699,12 @@ test("Concurrent verification of the same challenge creates exactly one session"
     [userId],
   );
 
-  const responses = await Promise.all([
-    verify(challengeToken, code),
-    verify(challengeToken, code),
-  ]);
+  const responses = await Promise.all([verify(challengeToken, code), verify(challengeToken, code)]);
 
   const statuses = responses.map((response) => response.status).sort();
   assert.deepEqual(statuses, [200, 401]);
 
-  const successfulResponses = responses.filter(
-    (response) => response.status === 200,
-  );
+  const successfulResponses = responses.filter((response) => response.status === 200);
   assert.equal(successfulResponses.length, 1);
   assert.ok(getCookie(successfulResponses[0]));
 
@@ -770,10 +722,9 @@ test("Concurrent verification of the same challenge creates exactly one session"
 });
 
 test("Different challenges cannot reuse the same TOTP time step concurrently", async () => {
-  await migrator.query(
-    "UPDATE user_mfa SET last_accepted_time_step = NULL WHERE user_id = $1",
-    [userId],
-  );
+  await migrator.query("UPDATE user_mfa SET last_accepted_time_step = NULL WHERE user_id = $1", [
+    userId,
+  ]);
 
   const [firstChallenge, secondChallenge] = await Promise.all([
     createChallenge(),
@@ -796,9 +747,7 @@ test("Different challenges cannot reuse the same TOTP time step concurrently", a
   const statuses = responses.map((response) => response.status).sort();
   assert.deepEqual(statuses, [200, 401]);
 
-  const successfulResponses = responses.filter(
-    (response) => response.status === 200,
-  );
+  const successfulResponses = responses.filter((response) => response.status === 200);
   assert.equal(successfulResponses.length, 1);
   assert.ok(getCookie(successfulResponses[0]));
 
@@ -849,10 +798,9 @@ test("MFA enrollment activation enforces ownership, expiry and one-time consumpt
       (error) => error.code === "42501",
     );
 
-    const stillPending = await migrator.query(
-      "SELECT id FROM mfa_enrollments WHERE id = $1",
-      [owner.enrollmentId],
-    );
+    const stillPending = await migrator.query("SELECT id FROM mfa_enrollments WHERE id = $1", [
+      owner.enrollmentId,
+    ]);
     assert.equal(stillPending.rowCount, 1);
 
     // A valid owner context activates and consumes the enrollment.
@@ -875,23 +823,13 @@ test("MFA enrollment activation enforces ownership, expiry and one-time consumpt
 
     assert.equal(activeMfa.rowCount, 1);
     assert.equal(activeMfa.rows[0].status, "ENABLED");
-    assert.deepEqual(
-      activeMfa.rows[0].encrypted_secret,
-      owner.encryptedSecret,
-    );
-    assert.equal(
-      Number(activeMfa.rows[0].last_accepted_time_step),
-      currentStep,
-    );
-    assert.equal(
-      activeMfa.rows[0].enabled_at.getTime(),
-      enabledAt.getTime(),
-    );
+    assert.deepEqual(activeMfa.rows[0].encrypted_secret, owner.encryptedSecret);
+    assert.equal(Number(activeMfa.rows[0].last_accepted_time_step), currentStep);
+    assert.equal(activeMfa.rows[0].enabled_at.getTime(), enabledAt.getTime());
 
-    const consumed = await migrator.query(
-      "SELECT id FROM mfa_enrollments WHERE id = $1",
-      [owner.enrollmentId],
-    );
+    const consumed = await migrator.query("SELECT id FROM mfa_enrollments WHERE id = $1", [
+      owner.enrollmentId,
+    ]);
     assert.equal(consumed.rowCount, 0);
 
     // The same enrollment cannot be activated a second time.
@@ -919,44 +857,29 @@ test("MFA enrollment activation enforces ownership, expiry and one-time consumpt
       (error) => error.code === "P0002",
     );
 
-    const expiredMfa = await migrator.query(
-      "SELECT id FROM user_mfa WHERE user_id = $1",
-      [expired.userId],
-    );
+    const expiredMfa = await migrator.query("SELECT id FROM user_mfa WHERE user_id = $1", [
+      expired.userId,
+    ]);
     assert.equal(expiredMfa.rowCount, 0);
 
-    const expiredEnrollment = await migrator.query(
-      "SELECT id FROM mfa_enrollments WHERE id = $1",
-      [expired.enrollmentId],
-    );
+    const expiredEnrollment = await migrator.query("SELECT id FROM mfa_enrollments WHERE id = $1", [
+      expired.enrollmentId,
+    ]);
     assert.equal(expiredEnrollment.rowCount, 1);
   } finally {
     for (const fixture of fixtures) {
-      await migrator.query(
-        "DELETE FROM mfa_enrollments WHERE user_id = $1",
-        [fixture.userId],
-      );
-      await migrator.query(
-        "DELETE FROM user_mfa WHERE user_id = $1",
-        [fixture.userId],
-      );
-      await migrator.query(
-        "DELETE FROM users WHERE id = $1",
-        [fixture.userId],
-      );
+      await migrator.query("DELETE FROM mfa_enrollments WHERE user_id = $1", [fixture.userId]);
+      await migrator.query("DELETE FROM user_mfa WHERE user_id = $1", [fixture.userId]);
+      await migrator.query("DELETE FROM users WHERE id = $1", [fixture.userId]);
     }
   }
 });
-
 
 test("MFA enrollment start authenticates, replaces pending secrets safely, and enforces protections", async () => {
   // Establish one MFA-verified session. Reuse it throughout this test:
   // the fixture's TOTP replay protection intentionally prevents reuse.
   const challengeToken = await createChallenge();
-  const code = mfaCrypto.generateTotpCode(
-    secret,
-    Math.floor(Date.now() / 30000) + 1,
-  );
+  const code = mfaCrypto.generateTotpCode(secret, Math.floor(Date.now() / 30000) + 1);
 
   const verification = await verify(challengeToken, code);
   assert.equal(verification.status, 200);
@@ -1015,18 +938,12 @@ test("MFA enrollment start authenticates, replaces pending secrets safely, and e
 
   assert.equal(firstEnrollment.rowCount, 1);
   assert.ok(firstEnrollment.rows[0].expires_at.getTime() > Date.now());
-  assert.ok(
-    firstEnrollment.rows[0].expires_at.getTime() <= Date.now() + 11 * 60 * 1000,
-  );
+  assert.ok(firstEnrollment.rows[0].expires_at.getTime() <= Date.now() + 11 * 60 * 1000);
 
   const firstEnrollmentId = firstEnrollment.rows[0].id;
-  const firstEncryptedSecret =
-    firstEnrollment.rows[0].encrypted_secret.toString("hex");
+  const firstEncryptedSecret = firstEnrollment.rows[0].encrypted_secret.toString("hex");
 
-  assert.notEqual(
-    firstEncryptedSecret,
-    activeBefore.rows[0].encrypted_secret.toString("hex"),
-  );
+  assert.notEqual(firstEncryptedSecret, activeBefore.rows[0].encrypted_secret.toString("hex"));
 
   // 2. Starting again replaces the pending secret, not active MFA.
   const secondResponse = await enrollmentRequest({ password });
@@ -1042,10 +959,7 @@ test("MFA enrollment start authenticates, replaces pending secrets safely, and e
 
   assert.equal(secondEnrollment.rowCount, 1);
   assert.equal(secondEnrollment.rows[0].id, firstEnrollmentId);
-  assert.notEqual(
-    secondEnrollment.rows[0].encrypted_secret.toString("hex"),
-    firstEncryptedSecret,
-  );
+  assert.notEqual(secondEnrollment.rows[0].encrypted_secret.toString("hex"), firstEncryptedSecret);
 
   const activeAfterReplacement = await migrator.query(
     `SELECT encrypted_secret, status, enabled_at
@@ -1077,10 +991,7 @@ test("MFA enrollment start authenticates, replaces pending secrets safely, and e
     [userId],
   );
 
-  assert.equal(
-    afterCsrf.rows[0].encrypted_secret.toString("hex"),
-    beforeCsrf,
-  );
+  assert.equal(afterCsrf.rows[0].encrypted_secret.toString("hex"), beforeCsrf);
 
   // 4. Wrong password must fail and leave the pending enrollment unchanged.
   const wrongPasswordResponse = await enrollmentRequest({
@@ -1096,10 +1007,7 @@ test("MFA enrollment start authenticates, replaces pending secrets safely, and e
     [userId],
   );
 
-  assert.equal(
-    afterWrongPassword.rows[0].encrypted_secret.toString("hex"),
-    beforeCsrf,
-  );
+  assert.equal(afterWrongPassword.rows[0].encrypted_secret.toString("hex"), beforeCsrf);
 
   const failureAudit = await migrator.query(
     `SELECT count(*)::int AS total
@@ -1133,10 +1041,7 @@ test("MFA enrollment start authenticates, replaces pending secrets safely, and e
     [userId],
   );
 
-  assert.equal(
-    afterRateLimit.rows[0].encrypted_secret.toString("hex"),
-    beforeCsrf,
-  );
+  assert.equal(afterRateLimit.rows[0].encrypted_secret.toString("hex"), beforeCsrf);
 
   // Verify both successful starts were audited.
   const successAudit = await migrator.query(
@@ -1150,7 +1055,6 @@ test("MFA enrollment start authenticates, replaces pending secrets safely, and e
 
   assert.equal(successAudit.rows[0].total, 2);
 });
-
 
 test("MFA authenticator replacement requires both factors and invalidates the old session", async () => {
   // Authenticate with the currently enabled authenticator.
@@ -1181,14 +1085,11 @@ test("MFA authenticator replacement requires both factors and invalidates the ol
   };
 
   // Start a replacement enrollment.
-  const startResponse = await fetch(
-    `${apiBaseUrl}/api/v1/auth/mfa/enrollment`,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ password }),
-    },
-  );
+  const startResponse = await fetch(`${apiBaseUrl}/api/v1/auth/mfa/enrollment`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ password }),
+  });
 
   assert.equal(startResponse.status, 200);
   const startBody = await startResponse.json();
@@ -1259,16 +1160,8 @@ test("MFA authenticator replacement requires both factors and invalidates the ol
 
   // 2. A valid old factor cannot compensate for an invalid pending factor.
   let invalidPendingCode = "000000";
-  while (
-    mfaCrypto.verifyTotpCode(
-      pendingSecret,
-      invalidPendingCode,
-      Date.now(),
-    ) !== null
-  ) {
-    invalidPendingCode = String(
-      (Number(invalidPendingCode) + 1) % 1000000,
-    ).padStart(6, "0");
+  while (mfaCrypto.verifyTotpCode(pendingSecret, invalidPendingCode, Date.now()) !== null) {
+    invalidPendingCode = String((Number(invalidPendingCode) + 1) % 1000000).padStart(6, "0");
   }
 
   const invalidConfirmation = await confirm({
@@ -1295,10 +1188,7 @@ test("MFA authenticator replacement requires both factors and invalidates the ol
     afterInvalidConfirmation.rows[0].enabled_at.getTime(),
     activeBefore.rows[0].enabled_at.getTime(),
   );
-  assert.equal(
-    afterInvalidConfirmation.rows[0].last_accepted_time_step,
-    null,
-  );
+  assert.equal(afterInvalidConfirmation.rows[0].last_accepted_time_step, null);
 
   const pendingAfterFailure = await migrator.query(
     `SELECT id FROM mfa_enrollments WHERE user_id = $1`,
@@ -1340,18 +1230,13 @@ test("MFA authenticator replacement requires both factors and invalidates the ol
   assert.equal(activeAfterSuccess.rowCount, 1);
   assert.equal(activeAfterSuccess.rows[0].status, "ENABLED");
   assert.ok(
-    mfaCrypto
-      .decryptSecret(activeAfterSuccess.rows[0].encrypted_secret)
-      .equals(pendingSecret),
+    mfaCrypto.decryptSecret(activeAfterSuccess.rows[0].encrypted_secret).equals(pendingSecret),
   );
   assert.ok(
     activeAfterSuccess.rows[0].enabled_at.getTime() >=
       new Date(confirmationBody.enabledAt).getTime() - 1,
   );
-  assert.equal(
-    activeAfterSuccess.rows[0].last_accepted_time_step.toString(),
-    String(timeStep),
-  );
+  assert.equal(activeAfterSuccess.rows[0].last_accepted_time_step.toString(), String(timeStep));
 
   // 6. Successful replacement must have an audit record.
   const replacementAudit = await migrator.query(
@@ -1366,20 +1251,16 @@ test("MFA authenticator replacement requires both factors and invalidates the ol
   assert.equal(replacementAudit.rows[0].total, 1);
 
   // 7. The previous MFA-verified session predates the new enabled_at.
-  const oldSessionResponse = await fetch(
-    `${apiBaseUrl}/api/v1/auth/me`,
-    {
-      method: "GET",
-      headers: {
-        Origin: frontendOrigin,
-        Cookie: cookieHeader(sessionToken),
-      },
+  const oldSessionResponse = await fetch(`${apiBaseUrl}/api/v1/auth/me`, {
+    method: "GET",
+    headers: {
+      Origin: frontendOrigin,
+      Cookie: cookieHeader(sessionToken),
     },
-  );
+  });
 
   assert.equal(oldSessionResponse.status, 401);
 });
-
 
 test("Recovery-code regeneration requires fresh authentication and atomically replaces the batch", async () => {
   // This test follows authenticator replacement. Reset only the test
@@ -1399,9 +1280,7 @@ test("Recovery-code regeneration requires fresh authentication and atomically re
   );
   assert.equal(activeResult.rowCount, 1);
 
-  const activeSecret = mfaCrypto.decryptSecret(
-    Buffer.from(activeResult.rows[0].encrypted_secret),
-  );
+  const activeSecret = mfaCrypto.decryptSecret(Buffer.from(activeResult.rows[0].encrypted_secret));
 
   // Establish a fresh MFA-verified session.
   const loginStep = Math.floor(Date.now() / 30000);
@@ -1418,25 +1297,19 @@ test("Recovery-code regeneration requires fresh authentication and atomically re
   assert.match(csrfToken, /^[a-f0-9]{64}$/);
 
   const regenerationStep = loginStep + 1;
-  const currentCode = mfaCrypto.generateTotpCode(
-    activeSecret,
-    regenerationStep,
-  );
+  const currentCode = mfaCrypto.generateTotpCode(activeSecret, regenerationStep);
 
   const regenerationRequest = (body, csrf = csrfToken) =>
-    fetch(
-      `${apiBaseUrl}/api/v1/auth/mfa/recovery-codes/regenerate`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Origin: frontendOrigin,
-          Cookie: cookieHeader(sessionToken),
-          ...(csrf ? { "x-csrf-token": csrf } : {}),
-        },
-        body: JSON.stringify(body),
+    fetch(`${apiBaseUrl}/api/v1/auth/mfa/recovery-codes/regenerate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: frontendOrigin,
+        Cookie: cookieHeader(sessionToken),
+        ...(csrf ? { "x-csrf-token": csrf } : {}),
       },
-    );
+      body: JSON.stringify(body),
+    });
 
   // Insert a known old code to verify batch invalidation.
   const oldRecoveryCode = mfaCrypto.generateRecoveryCode();
@@ -1449,10 +1322,7 @@ test("Recovery-code regeneration requires fresh authentication and atomically re
   );
 
   // Missing CSRF must not change the recovery-code batch.
-  const csrfFailure = await regenerationRequest(
-    { password, currentCode },
-    null,
-  );
+  const csrfFailure = await regenerationRequest({ password, currentCode }, null);
   assert.equal(csrfFailure.status, 403);
 
   const oldCodeBefore = await migrator.query(
@@ -1473,16 +1343,8 @@ test("Recovery-code regeneration requires fresh authentication and atomically re
 
   // Find a definitely invalid six-digit code.
   let invalidCode = "000000";
-  while (
-    mfaCrypto.verifyTotpCode(
-      activeSecret,
-      invalidCode,
-      Date.now(),
-    ) !== null
-  ) {
-    invalidCode = String(
-      (Number(invalidCode) + 1) % 1000000,
-    ).padStart(6, "0");
+  while (mfaCrypto.verifyTotpCode(activeSecret, invalidCode, Date.now()) !== null) {
+    invalidCode = String((Number(invalidCode) + 1) % 1000000).padStart(6, "0");
   }
 
   const factorFailure = await regenerationRequest({
@@ -1534,14 +1396,9 @@ test("Recovery-code regeneration requires fresh authentication and atomically re
   const expectedHashes = new Set(
     body.recoveryCodes.map((code) => mfaCrypto.hashRecoveryCode(code)),
   );
-  const storedHashes = new Set(
-    activeCodes.rows.map((row) => row.code_hash.trim()),
-  );
+  const storedHashes = new Set(activeCodes.rows.map((row) => row.code_hash.trim()));
   assert.deepEqual(storedHashes, expectedHashes);
-  assert.equal(
-    activeCodes.rows.filter((row) => row.consumed_at === null).length,
-    10,
-  );
+  assert.equal(activeCodes.rows.filter((row) => row.consumed_at === null).length, 10);
 
   // Reusing the same TOTP time step must fail.
   const replayFailure = await regenerationRequest({
@@ -1552,10 +1409,7 @@ test("Recovery-code regeneration requires fresh authentication and atomically re
 
   // The previous batch's code must no longer authenticate.
   const oldCodeChallenge = await createChallenge();
-  const oldCodeLogin = await verify(
-    oldCodeChallenge,
-    oldRecoveryCode,
-  );
+  const oldCodeLogin = await verify(oldCodeChallenge, oldRecoveryCode);
   assert.equal(oldCodeLogin.status, 401);
   assert.equal(oldCodeLogin.headers.get("set-cookie"), null);
 
@@ -1584,24 +1438,18 @@ test("Recovery-code regeneration requires fresh authentication and atomically re
   );
 
   const successfulAudits = audit.rows.filter(
-    (row) =>
-      row.action === "auth.mfa.recovery_codes_regenerated" &&
-      row.outcome === "SUCCESS",
+    (row) => row.action === "auth.mfa.recovery_codes_regenerated" && row.outcome === "SUCCESS",
   );
   assert.equal(successfulAudits.length, 1);
   assert.equal(successfulAudits[0].total, 1);
 
   const failedAudits = audit.rows.filter(
     (row) =>
-      row.action === "auth.mfa.recovery_codes_regeneration_failed" &&
-      row.outcome === "FAILURE",
+      row.action === "auth.mfa.recovery_codes_regeneration_failed" && row.outcome === "FAILURE",
   );
   assert.ok(failedAudits.length >= 1);
-  assert.ok(
-    failedAudits.reduce((sum, row) => sum + row.total, 0) >= 3,
-  );
+  assert.ok(failedAudits.reduce((sum, row) => sum + row.total, 0) >= 3);
 });
-
 
 test("MFA disable requires fresh authentication and atomically revokes MFA credentials and sessions", async () => {
   // Isolate this final lifecycle test from replay-counter state left by
@@ -1614,9 +1462,7 @@ test("MFA disable requires fresh authentication and atomically revokes MFA crede
   );
   assert.equal(activeResult.rowCount, 1);
 
-  const activeSecret = mfaCrypto.decryptSecret(
-    Buffer.from(activeResult.rows[0].encrypted_secret),
-  );
+  const activeSecret = mfaCrypto.decryptSecret(Buffer.from(activeResult.rows[0].encrypted_secret));
 
   await migrator.query(
     `UPDATE user_mfa
@@ -1647,10 +1493,7 @@ test("MFA disable requires fresh authentication and atomically revokes MFA crede
   const csrfToken = verificationBody.csrfToken;
   assert.match(csrfToken, /^[a-f0-9]{64}$/);
 
-  const currentCode = mfaCrypto.generateTotpCode(
-    activeSecret,
-    disableStep,
-  );
+  const currentCode = mfaCrypto.generateTotpCode(activeSecret, disableStep);
 
   const disableRequest = (body, csrf = csrfToken) =>
     fetch(`${apiBaseUrl}/api/v1/auth/mfa/disable`, {
@@ -1682,11 +1525,7 @@ test("MFA disable requires fresh authentication and atomically revokes MFA crede
        id, user_id, encrypted_secret, expires_at, updated_at
      )
      VALUES ($1, $2, $3, NOW() + INTERVAL '10 minutes', NOW())`,
-    [
-      pendingEnrollmentId,
-      userId,
-      mfaCrypto.encryptSecret(pendingSecret),
-    ],
+    [pendingEnrollmentId, userId, mfaCrypto.encryptSecret(pendingSecret)],
   );
 
   await migrator.query(
@@ -1705,10 +1544,7 @@ test("MFA disable requires fresh authentication and atomically revokes MFA crede
   assert.equal(sessionBefore.rows[0].revoked_at, null);
 
   // 1. Missing CSRF must not change any lifecycle state.
-  const csrfFailure = await disableRequest(
-    { password, currentCode },
-    null,
-  );
+  const csrfFailure = await disableRequest({ password, currentCode }, null);
   assert.equal(csrfFailure.status, 403);
 
   // 2. Wrong password must not consume the valid TOTP step.
@@ -1720,16 +1556,8 @@ test("MFA disable requires fresh authentication and atomically revokes MFA crede
 
   // 3. A valid password cannot compensate for an invalid factor.
   let invalidCode = "000000";
-  while (
-    mfaCrypto.verifyTotpCode(
-      activeSecret,
-      invalidCode,
-      Date.now(),
-    ) !== null
-  ) {
-    invalidCode = String(
-      (Number(invalidCode) + 1) % 1000000,
-    ).padStart(6, "0");
+  while (mfaCrypto.verifyTotpCode(activeSecret, invalidCode, Date.now()) !== null) {
+    invalidCode = String((Number(invalidCode) + 1) % 1000000).padStart(6, "0");
   }
 
   const factorFailure = await disableRequest({
@@ -1757,31 +1585,17 @@ test("MFA disable requires fresh authentication and atomically revokes MFA crede
      JOIN mfa_challenges c
        ON c.user_id = m.user_id AND c.token_hash = $4
      WHERE m.user_id = $1`,
-    [
-      userId,
-      hashToken(sessionToken),
-      oldRecoveryHash,
-      outstandingChallengeHash,
-    ],
+    [userId, hashToken(sessionToken), oldRecoveryHash, outstandingChallengeHash],
   );
 
   assert.equal(stateAfterFailures.rowCount, 1);
   assert.equal(stateAfterFailures.rows[0].status, "ENABLED");
   assert.ok(stateAfterFailures.rows[0].enabled_at);
-  assert.equal(
-    stateAfterFailures.rows[0].last_accepted_time_step,
-    String(loginStep),
-  );
+  assert.equal(stateAfterFailures.rows[0].last_accepted_time_step, String(loginStep));
   assert.equal(stateAfterFailures.rows[0].revoked_at, null);
   assert.equal(stateAfterFailures.rows[0].recovery_consumed_at, null);
-  assert.equal(
-    stateAfterFailures.rows[0].enrollment_id,
-    pendingEnrollmentId,
-  );
-  assert.equal(
-    stateAfterFailures.rows[0].challenge_consumed_at,
-    null,
-  );
+  assert.equal(stateAfterFailures.rows[0].enrollment_id, pendingEnrollmentId);
+  assert.equal(stateAfterFailures.rows[0].challenge_consumed_at, null);
 
   // 4. A fresh password + TOTP disables MFA and invalidates every session.
   const success = await disableRequest({ password, currentCode });
@@ -1834,15 +1648,12 @@ test("MFA disable requires fresh authentication and atomically revokes MFA crede
   assert.ok(invalidatedCredentials.rows[0].challenge_consumed_at);
 
   // The old browser session must no longer authenticate.
-  const oldSessionResponse = await fetch(
-    `${apiBaseUrl}/api/v1/auth/me`,
-    {
-      headers: {
-        Origin: frontendOrigin,
-        Cookie: cookieHeader(sessionToken),
-      },
+  const oldSessionResponse = await fetch(`${apiBaseUrl}/api/v1/auth/me`, {
+    headers: {
+      Origin: frontendOrigin,
+      Cookie: cookieHeader(sessionToken),
     },
-  );
+  });
   assert.equal(oldSessionResponse.status, 401);
 
   const audit = await migrator.query(
@@ -1858,23 +1669,16 @@ test("MFA disable requires fresh authentication and atomically revokes MFA crede
   );
 
   const successAudits = audit.rows.filter(
-    (row) =>
-      row.action === "auth.mfa.disabled" &&
-      row.outcome === "SUCCESS",
+    (row) => row.action === "auth.mfa.disabled" && row.outcome === "SUCCESS",
   );
   assert.equal(successAudits.length, 1);
   assert.equal(successAudits[0].total, 1);
 
   const failureAudits = audit.rows.filter(
-    (row) =>
-      row.action === "auth.mfa.disable_failed" &&
-      row.outcome === "FAILURE",
+    (row) => row.action === "auth.mfa.disable_failed" && row.outcome === "FAILURE",
   );
-  assert.ok(
-    failureAudits.reduce((sum, row) => sum + row.total, 0) >= 2,
-  );
+  assert.ok(failureAudits.reduce((sum, row) => sum + row.total, 0) >= 2);
 });
-
 
 test("Active platform administrators cannot disable MFA or consume a TOTP step", async () => {
   const adminUserId = randomUUID();
@@ -1901,11 +1705,7 @@ test("Active platform administrators cannot disable MFA or consume a TOTP step",
          id, user_id, encrypted_secret, status, enabled_at, updated_at
        )
        VALUES ($1, $2, $3, 'ENABLED', NOW(), NOW())`,
-      [
-        randomUUID(),
-        adminUserId,
-        mfaCrypto.encryptSecret(adminSecret),
-      ],
+      [randomUUID(), adminUserId, mfaCrypto.encryptSecret(adminSecret)],
     );
 
     await migrator.query(
@@ -1920,20 +1720,17 @@ test("Active platform administrators cannot disable MFA or consume a TOTP step",
     const loginStep = baseStep - 1;
     const disableStep = baseStep;
 
-    const loginResponse = await fetch(
-      `${apiBaseUrl}/api/v1/auth/login`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Origin: frontendOrigin,
-        },
-        body: JSON.stringify({
-          email: adminEmail,
-          password: adminPassword,
-        }),
+    const loginResponse = await fetch(`${apiBaseUrl}/api/v1/auth/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: frontendOrigin,
       },
-    );
+      body: JSON.stringify({
+        email: adminEmail,
+        password: adminPassword,
+      }),
+    });
 
     assert.equal(loginResponse.status, 200);
     const loginBody = await loginResponse.json();
@@ -1951,31 +1748,22 @@ test("Active platform administrators cannot disable MFA or consume a TOTP step",
 
     assert.match(csrfToken, /^[a-f0-9]{64}$/);
 
-    const disableResponse = await fetch(
-      `${apiBaseUrl}/api/v1/auth/mfa/disable`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Origin: frontendOrigin,
-          Cookie: cookieHeader(sessionToken),
-          "x-csrf-token": csrfToken,
-        },
-        body: JSON.stringify({
-          password: adminPassword,
-          currentCode: mfaCrypto.generateTotpCode(
-            adminSecret,
-            disableStep,
-          ),
-        }),
+    const disableResponse = await fetch(`${apiBaseUrl}/api/v1/auth/mfa/disable`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: frontendOrigin,
+        Cookie: cookieHeader(sessionToken),
+        "x-csrf-token": csrfToken,
       },
-    );
+      body: JSON.stringify({
+        password: adminPassword,
+        currentCode: mfaCrypto.generateTotpCode(adminSecret, disableStep),
+      }),
+    });
 
     assert.equal(disableResponse.status, 401);
-    assert.equal(
-      disableResponse.headers.get("cache-control"),
-      "no-store",
-    );
+    assert.equal(disableResponse.headers.get("cache-control"), "no-store");
 
     const state = await migrator.query(
       `SELECT
@@ -1994,10 +1782,7 @@ test("Active platform administrators cannot disable MFA or consume a TOTP step",
     assert.equal(state.rowCount, 1);
     assert.equal(state.rows[0].status, "ENABLED");
     assert.ok(state.rows[0].enabled_at);
-    assert.equal(
-      state.rows[0].last_accepted_time_step,
-      String(loginStep),
-    );
+    assert.equal(state.rows[0].last_accepted_time_step, String(loginStep));
     assert.equal(state.rows[0].revoked_at, null);
 
     const audit = await migrator.query(
@@ -2016,45 +1801,19 @@ test("Active platform administrators cannot disable MFA or consume a TOTP step",
     if (fixtureCreated) {
       await migrator.query("BEGIN");
       try {
-        await migrator.query(
-          "ALTER TABLE audit_events DISABLE TRIGGER audit_events_immutable",
-        );
-        await migrator.query(
-          "DELETE FROM audit_events WHERE actor_user_id = $1",
-          [adminUserId],
-        );
-        await migrator.query(
-          "ALTER TABLE audit_events ENABLE TRIGGER audit_events_immutable",
-        );
+        await migrator.query("ALTER TABLE audit_events DISABLE TRIGGER audit_events_immutable");
+        await migrator.query("DELETE FROM audit_events WHERE actor_user_id = $1", [adminUserId]);
+        await migrator.query("ALTER TABLE audit_events ENABLE TRIGGER audit_events_immutable");
 
-        await migrator.query(
-          "DELETE FROM platform_administrators WHERE user_id = $1",
-          [adminUserId],
-        );
-        await migrator.query(
-          "DELETE FROM mfa_challenges WHERE user_id = $1",
-          [adminUserId],
-        );
-        await migrator.query(
-          "DELETE FROM mfa_enrollments WHERE user_id = $1",
-          [adminUserId],
-        );
-        await migrator.query(
-          "DELETE FROM mfa_recovery_codes WHERE user_id = $1",
-          [adminUserId],
-        );
-        await migrator.query(
-          "DELETE FROM user_mfa WHERE user_id = $1",
-          [adminUserId],
-        );
-        await migrator.query(
-          "DELETE FROM auth_sessions WHERE user_id = $1",
-          [adminUserId],
-        );
-        await migrator.query(
-          "DELETE FROM users WHERE id = $1",
-          [adminUserId],
-        );
+        await migrator.query("DELETE FROM platform_administrators WHERE user_id = $1", [
+          adminUserId,
+        ]);
+        await migrator.query("DELETE FROM mfa_challenges WHERE user_id = $1", [adminUserId]);
+        await migrator.query("DELETE FROM mfa_enrollments WHERE user_id = $1", [adminUserId]);
+        await migrator.query("DELETE FROM mfa_recovery_codes WHERE user_id = $1", [adminUserId]);
+        await migrator.query("DELETE FROM user_mfa WHERE user_id = $1", [adminUserId]);
+        await migrator.query("DELETE FROM auth_sessions WHERE user_id = $1", [adminUserId]);
+        await migrator.query("DELETE FROM users WHERE id = $1", [adminUserId]);
 
         await migrator.query("COMMIT");
       } catch (error) {
@@ -2114,12 +1873,7 @@ async function createActivationFixture({ expired = false } = {}) {
   };
 }
 
-async function activateEnrollment({
-  contextUserId,
-  userId,
-  enrollmentId,
-  timeStep,
-}) {
+async function activateEnrollment({ contextUserId, userId, enrollmentId, timeStep }) {
   await appClient.query("BEGIN");
 
   try {
