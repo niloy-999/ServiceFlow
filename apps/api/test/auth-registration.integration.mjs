@@ -758,17 +758,17 @@ test("Concurrent verification and resend preserve a consistent account state", a
     [verificationResendRaceEmail],
   );
 
-  assert.equal(tokenResult.rowCount, 2);
-
   const activeTokens = tokenResult.rows.filter((token) => token.consumed_at === null);
   const resendAttempts = deliveryAttempts
     .filter((attempt) => attempt.email === verificationResendRaceEmail)
     .slice(attemptsBeforeRace);
 
   if (userResult.rows[0].email_verified_at !== null) {
+    assert.equal(tokenResult.rowCount, 1);
     assert.equal(activeTokens.length, 0);
     assert.equal(resendAttempts.length, 0);
   } else {
+    assert.equal(tokenResult.rowCount, 2);
     assert.equal(activeTokens.length, 1);
     assert.equal(resendAttempts.length, 1);
 

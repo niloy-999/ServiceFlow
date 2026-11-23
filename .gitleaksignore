@@ -1,0 +1,4 @@
+# Historical matches are placeholder values in environment templates, not usable credentials.
+42aae1a57857a5aa900783412c69a65cc5eb104c:.env.local.example:generic-api-key:13
+feb9f274e9e52f838dada5bb4556ed8f5bfca7d7:apps/api/.env.example:generic-api-key:19
+d869079b6b6b272b710e60407930c88a0a8b9c47:apps/api/.env.example:generic-api-key:15
