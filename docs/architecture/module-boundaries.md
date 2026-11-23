@@ -9,7 +9,7 @@
 | `AuditModule`     | Validated append-only audit event insertion in the caller's transaction                                                                               | No audit query/export UI or general event framework is implemented.                                                                                                               |
 | `RateLimitModule` | PostgreSQL-backed rate-limit counter consumption                                                                                                      | Requires a dedicated HMAC secret; storage cleanup/retention operations are not implemented.                                                                                       |
 | `PrismaModule`    | Prisma client lifecycle and database access                                                                                                           | `PrismaService` uses the configured runtime `DATABASE_URL`; migration tooling separately uses `MIGRATION_DATABASE_URL`.                                                           |
-| `HealthModule`    | Database connectivity health endpoint                                                                                                                 | Current response is a DB-backed health check; separate liveness/readiness endpoints are not implemented.                                                                          |
+| `HealthModule`    | Process liveness and database readiness endpoints                                                                                                     | `/health/live` avoids dependency checks; `/health/ready` queries PostgreSQL. The prior root health route remains a readiness alias. No orchestrator probes are configured.        |
 
 ## Data access and transaction scope
 
@@ -20,6 +20,8 @@ Audit insertion accepts the caller's transaction client so the audit record can 
 ## Dependency direction
 
 HTTP controllers call their owning application services. Application services depend on identity/security services, audit insertion, and database access as required. Shared packages must not absorb domain rules or import Prisma models into the web application. Keep cross-module calls explicit through exported Nest providers; do not create speculative abstractions or a second service boundary until real reuse or deployment requirements justify it.
+
+`main.ts` registers a global HTTP request logging interceptor. It generates request IDs and logs only safe, matched route templates and status/duration metadata. It does not log request bodies, raw path/query values, IP addresses or error messages.
 
 ## Boundaries not yet implemented
 
