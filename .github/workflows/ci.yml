@@ -18,8 +18,8 @@ jobs:
       MIGRATION_DATABASE_URL: postgresql://serviceflow_migrator:ci-placeholder@127.0.0.1:5432/serviceflow_test?schema=public
       SHADOW_DATABASE_URL: postgresql://serviceflow_migrator:ci-placeholder@127.0.0.1:5432/serviceflow_shadow?schema=public
       WEB_APP_URL: http://localhost:3000
-      CSRF_HMAC_SECRET: 0000000000000000000000000000000000000000000000000000000000000000
-      RATE_LIMIT_HMAC_SECRET: 1111111111111111111111111111111111111111111111111111111111111111
+      CSRF_HMAC_SECRET: "0000000000000000000000000000000000000000000000000000000000000000"
+      RATE_LIMIT_HMAC_SECRET: "1111111111111111111111111111111111111111111111111111111111111111"
       MFA_ENCRYPTION_KEYS: '{"ci-v1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}'
       MFA_ENCRYPTION_LEGACY_KEY_ID: ci-v1
       MFA_ENCRYPTION_ACTIVE_KEY_ID: ci-v1
@@ -32,15 +32,15 @@ jobs:
       - name: Activate locked pnpm
         run: corepack prepare pnpm@10.34.9 --activate
       - name: Install from lockfile
-        run: pnpm install --frozen-lockfile
+        run: corepack pnpm install --frozen-lockfile
       - name: Check formatting
-        run: pnpm format:check
+        run: corepack pnpm format:check
       - name: TypeScript checks
-        run: pnpm typecheck
+        run: corepack pnpm typecheck
       - name: Unit tests
-        run: pnpm test:unit
+        run: corepack pnpm test:unit
       - name: Build applications
-        run: pnpm build
+        run: corepack pnpm build
 
   postgres-integration:
     name: PostgreSQL migrations and integration tests
@@ -65,8 +65,8 @@ jobs:
       MIGRATION_DATABASE_URL: postgresql://serviceflow_migrator:pending@127.0.0.1:5432/serviceflow_test?schema=public
       SHADOW_DATABASE_URL: postgresql://serviceflow_migrator:pending@127.0.0.1:5432/serviceflow_shadow?schema=public
       WEB_APP_URL: http://localhost:3000
-      CSRF_HMAC_SECRET: 2222222222222222222222222222222222222222222222222222222222222222
-      RATE_LIMIT_HMAC_SECRET: 3333333333333333333333333333333333333333333333333333333333333333
+      CSRF_HMAC_SECRET: "2222222222222222222222222222222222222222222222222222222222222222"
+      RATE_LIMIT_HMAC_SECRET: "3333333333333333333333333333333333333333333333333333333333333333"
       EMAIL_DELIVERY: local
       NODE_ENV: development
     steps:
@@ -78,7 +78,7 @@ jobs:
       - name: Activate locked pnpm
         run: corepack prepare pnpm@10.34.9 --activate
       - name: Install from lockfile
-        run: pnpm install --frozen-lockfile
+        run: corepack pnpm install --frozen-lockfile
       - name: Create isolated test roles and databases
         shell: bash
         run: |
@@ -102,9 +102,9 @@ jobs:
           } >> "$GITHUB_ENV"
           printf '%s\n' 'Initialized isolated PostgreSQL test roles and databases.'
       - name: Apply migrations to isolated test database
-        run: pnpm --filter @serviceflow/api db:migrate:deploy
+        run: corepack pnpm --filter @serviceflow/api db:migrate:deploy
       - name: Run PostgreSQL integration tests
-        run: pnpm test:integration
+        run: corepack pnpm test:integration
 
   secret-scan:
     name: Secret scan
@@ -118,4 +118,4 @@ jobs:
           docker run --rm
           --volume "$GITHUB_WORKSPACE:/repo:ro"
           ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb
-          git --redact --log-opts=--all /repo
+          git --verbose --redact --log-opts=--all /repo
