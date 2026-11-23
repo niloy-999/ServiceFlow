@@ -84,14 +84,15 @@ jobs:
         run: |
           MIGRATION_PASSWORD_VALUE="$(openssl rand -hex 32)"
           APP_PASSWORD_VALUE="$(openssl rand -hex 32)"
-          psql "postgresql://serviceflow_bootstrap:ci-bootstrap-password@127.0.0.1:5432/serviceflow_bootstrap" \
+          export PGPASSWORD=ci-bootstrap-password
+          export SERVICEFLOW_APP_PASSWORD="$APP_PASSWORD_VALUE"
+          export SERVICEFLOW_MIGRATOR_PASSWORD="$MIGRATION_PASSWORD_VALUE"
+          psql --host=127.0.0.1 --username=serviceflow_bootstrap --dbname=serviceflow_bootstrap \
             --set=ON_ERROR_STOP=1 \
-            --set=app_password="$APP_PASSWORD_VALUE" \
-            --set=migrator_password="$MIGRATION_PASSWORD_VALUE" \
-            --file=infra/local/postgres/init/roles.sql
-          psql "postgresql://serviceflow_bootstrap:ci-bootstrap-password@127.0.0.1:5432/serviceflow_bootstrap" \
+            --file=infra/local/postgres/init/sql/roles.sql
+          psql --host=127.0.0.1 --username=serviceflow_bootstrap --dbname=serviceflow_bootstrap \
             --set=ON_ERROR_STOP=1 \
-            --file=infra/local/postgres/init/databases.sql
+            --file=infra/local/postgres/init/sql/databases.sql
           {
             printf 'DATABASE_URL=postgresql://serviceflow_app:%s@127.0.0.1:5432/serviceflow_test?schema=public\n' "$APP_PASSWORD_VALUE"
             printf 'MIGRATION_DATABASE_URL=postgresql://serviceflow_migrator:%s@127.0.0.1:5432/serviceflow_test?schema=public\n' "$MIGRATION_PASSWORD_VALUE"
