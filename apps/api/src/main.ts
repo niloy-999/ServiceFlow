@@ -4,6 +4,7 @@ import { ValidationPipe } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { AppModule } from "./app.module.js";
 import { createApiLogger, getApiListenConfig } from "./config/runtime-config.js";
+import { HttpRequestLoggingInterceptor } from "./observability/http-request-logging.interceptor.js";
 
 function getFrontendOrigin(): string {
   const webAppUrl = process.env.WEB_APP_URL;
@@ -51,6 +52,7 @@ async function bootstrap() {
       callback: (error: Error | null, allow?: boolean) => void,
     ) => callback(null, requestOrigin === frontendOrigin),
     credentials: true,
+    exposedHeaders: ["X-Request-Id"],
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "X-CSRF-Token"],
   });
@@ -63,6 +65,8 @@ async function bootstrap() {
       forbidUnknownValues: true,
     }),
   );
+
+  app.useGlobalInterceptors(new HttpRequestLoggingInterceptor(logger));
 
   app.enableShutdownHooks();
 

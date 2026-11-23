@@ -4,6 +4,8 @@ services:
   db:
     image: postgres:17.12-alpine3.24
     restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1.5
     environment:
       POSTGRES_USER: serviceflow_bootstrap
       POSTGRES_PASSWORD: ${POSTGRES_BOOTSTRAP_PASSWORD:?Set POSTGRES_BOOTSTRAP_PASSWORD in .env.local}
@@ -17,7 +19,11 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U serviceflow_bootstrap -d serviceflow_dev"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U serviceflow_bootstrap -d serviceflow_dev && psql -U serviceflow_bootstrap -d serviceflow_dev -c 'SELECT 1' >/dev/null",
+        ]
       interval: 5s
       timeout: 3s
       retries: 12

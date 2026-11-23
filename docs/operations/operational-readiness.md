@@ -1,44 +1,45 @@
-# Operational readiness expectations
+# Operational readiness
 
-## Current evidence
+## Evidence and current status
 
-The API validates `WEB_APP_URL` as an HTTP(S) origin and requires HTTPS in production. CSRF, rate-limit and MFA key services validate their required secret formats when instantiated. `API_HOST` and `PORT` are validated; host defaults to loopback and the port must be in range. The API health endpoint queries PostgreSQL and reports database connectivity. The NestJS API logger emits JSON records and masks selected sensitive structured fields. Request correlation IDs, HTTP access logs, a metrics backend and log aggregation are not configured.
+Locally verified on Docker Desktop with PostgreSQL 17.12 Alpine (arm64): loopback-only published port, resource limits of 1 GiB and 1.5 CPU, separate bootstrap/migrator/runtime roles, and separate development, integration-test and Prisma shadow databases. All 18 migrations were applied to `serviceflow_dev` and `serviceflow_test`; 77 PostgreSQL integration tests passed against the isolated test database. Startup persistence is checked without deleting the named volume.
 
-This repository does not evidence a production deployment, backup configuration, restore drill, monitoring/alerting integration, incident-response exercise, or production secret-management system.
+`/api/v1/health/live` is a process liveness response that does not query PostgreSQL. `/api/v1/health/ready` checks database connectivity; `/api/v1/health` remains its compatibility alias. These endpoints are implemented but no orchestrator probes are configured. The HTTP interceptor generates a UUID per request, returns `X-Request-Id`, and emits structured completion/error events. Logs use matched route templates or `unmatched`, and omit raw query/path values, bodies, IP addresses, user agents, caller correlation values and error messages. Exception categories are fixed safe labels. The existing JSON logger redacts configured sensitive fields. There is no metrics backend, aggregation, alerting or on-call integration.
 
-## Configuration and deployment
+The local recovery script creates a PostgreSQL custom-format archive outside the repository with mode 0600 and restores into a random new database. The successful drill verified 18 migrations, representative user/audit rows, no unvalidated foreign keys, migrator ownership, restricted runtime grants and two RLS-enabled tables; Prisma reported the restored database up to date. Its generated target was removed after verification. Two earlier generated targets were independently rechecked against the same conditions (including Prisma status and no-context tenant reads) and removed only after the previously observed idle session ended and ownership was confirmed. Development/test/shadow databases and the volume were not deleted.
 
-- Keep local environment files untracked. Do not put credentials in Compose files, CI YAML, docs, command output, or Git history.
-- Use distinct runtime and migration credentials. Runtime pods/processes receive only `serviceflow_app`; migration execution is a controlled release operation with `serviceflow_migrator`.
-- Production secrets (session/CSRF, rate-limit HMAC, MFA encryption keyring, DB credentials) belong in a managed secret store with access logging and rotation. Never use local development values in production.
-- Terminate TLS at a trusted reverse proxy/load balancer. Configure API host binding and allowed origin deliberately; keep PostgreSQL on a private network with no public listener.
-- Roll out schema changes using backward-compatible expand/contract steps. Review locks and long-running operations before deployment. Prefer forward corrective migrations; rollback of schema/data is not automatic.
-- Apply committed migrations with `serviceflow_migrator` during a controlled release step. Confirm the target database identity first and retain a forward-fix or tested-restore plan; do not treat migration rollback as automatic data recovery.
-- Readiness should include required dependency availability; liveness should not cause restart loops on transient database failure. Current implementation has only a DB-backed health endpoint.
+These results are local development evidence only. No production deployment, production backup, independent penetration test, external monitoring, alerting, incident-response exercise, or production secret-management system is evidenced.
 
-## Backup and restore procedure requirements
+## Local PostgreSQL backup and restore drill
 
-Before production data exists, select a PostgreSQL provider and define encrypted backups, retention, point-in-time recovery, RPO/RTO, access controls and independent failure domains. Back up any object storage separately when it is introduced. Document a restore into an isolated target, validate migration compatibility and record data-integrity checks. Schedule and record restore drills. A written procedure is not evidence that a backup or drill exists.
-
-For a future managed PostgreSQL environment, an operator should provision a new isolated restore database first, with the expected application/migration roles and `serviceflow_migrator` as database owner. Keep archive files outside the repository, use encrypted storage, and never enable shell tracing while handling connection configuration. A logical backup can use:
+Prerequisites: local Compose PostgreSQL running through `scripts/local-postgres.sh`, committed migrations applied, root `.env.local` configured, workspace dependencies installed, and PostgreSQL 17 compatible `pg_dump`/`pg_restore` on the host. The script loads only root `.env.local`; it does not read `apps/api/.env`. It writes a private temporary libpq service file (mode 0600) so passwords do not appear in process arguments. The temporary directory is mode 0700. Archive path must be absolute, outside the repository, and nonexistent. The script refuses overwrite and never restores with `--clean`.
 
 ```sh
-umask 077
-pg_dump --format=custom --file="$BACKUP_FILE" "$BACKUP_DATABASE_URL"
+./scripts/pnpm.sh --filter @serviceflow/api exec node scripts/postgres-recovery-drill.mjs backup /private/tmp/serviceflow-local.dump
+./scripts/pnpm.sh --filter @serviceflow/api exec node scripts/postgres-recovery-drill.mjs restore-drill /private/tmp/serviceflow-local.dump
 ```
 
-Restore only into a newly created empty target. Do not use `--clean` or restore over an existing database:
+The backup source is the database in `MIGRATION_DATABASE_URL`; to back up `serviceflow_test`, set that process variable to the isolated test URL without printing it. Restore creates a generated disposable database and validates migration records, representative table counts, foreign keys, ownership, runtime grants, RLS settings, audit immutability grant, runtime role attributes, and tenant reads without context. It checks Prisma migration status. It only drops its generated target after successful validation, with connections closed and database owner rechecked. A failed target is preserved for investigation. The archive remains outside Git and is the operator's responsibility to protect and remove securely.
 
-```sh
-pg_restore --exit-on-error --no-owner --dbname="$RESTORE_DATABASE_URL" "$BACKUP_FILE"
-```
+The local drill is not a production backup procedure. For production, choose encrypted backups, retention, point-in-time recovery, RPO/RTO, access controls, independent failure domains, object-storage backup where applicable, and scheduled recorded restore drills. No production service or external account is configured here.
 
-After restore, check migration status, validate representative record counts and foreign-key/business invariants, verify runtime grants and RLS under `serviceflow_app`, and exercise health and critical workflows before directing traffic. Record the restore timestamp, backup identifier, target, checks and exceptions. These commands are a runbook starting point; no backup or restore has been executed for this repository.
+## Configuration, migrations and deployment
+
+- Keep local environment files untracked. Use distinct runtime and migration credentials; never provide bootstrap credentials to the application.
+- Production secrets belong in a managed secret store with access logging and rotation. Never reuse local values.
+- Terminate TLS at a trusted reverse proxy/load balancer. Keep PostgreSQL on a private network with no public listener.
+- Roll out schema changes with backward-compatible expand/contract steps. Review locks and long-running operations. Prefer forward corrective migrations; schema/data rollback is not automatic.
+- Apply committed migrations with `serviceflow_migrator` in a controlled release step. Confirm target database identity and retain a tested recovery or forward-fix plan.
+- Readiness and liveness routes are implemented. Configure orchestrator probes, TLS, startup/shutdown behavior and deployment health gates in the eventual hosting environment.
+
+## Email delivery boundary
+
+The local development adapter writes verification/reset mail to ignored `.local/mail` files, with directory mode 0700 and file mode 0600. It rejects local mode outside development and rejects unknown providers. No external provider, delivery guarantee, bounce handling, suppression list, sender domain, DKIM/SPF/DMARC or production credentials are implemented. Production release requires selecting and integrating a provider, configuring secrets safely, authenticating the sender domain, and testing delivery/retries/bounces/abuse controls.
 
 ## Monitoring and incident response
 
-Before launch, establish structured request/error logs with secret and personal-data redaction, request correlation IDs, database saturation/latency metrics, auth-abuse and rate-limit signals, migration alerts, backup status and availability checks. Define severity, incident commander, evidence preservation, credential revocation/rotation, customer/regulatory communication review, and post-incident actions. No alerting provider or on-call process is configured in this repository.
+Before launch, establish database saturation/latency metrics, authentication-abuse and rate-limit signals, migration alerts, backup status and availability checks. Define severity, incident commander, evidence preservation, credential revocation/rotation, customer/regulatory communication review and post-incident actions. No alerting provider, log aggregation or on-call process is configured.
 
 ## Release gates
 
-Require passing CI, isolated PostgreSQL migration/integration tests, reviewed migration/role grants, documented rollback or forward-fix plan, secret scan, deployment health checks, verified backup/restore evidence, and security review appropriate to the release. An independent penetration test remains a pre-public-launch requirement from the Phase 0 specification.
+Require passing CI, isolated PostgreSQL migration/integration tests, reviewed migration and role grants, documented rollback/forward-fix plan, secret scan, deployment health checks, verified production backup/restore evidence, and release-appropriate security review. An independent penetration test remains a pre-public-launch requirement from the Phase 0 specification. No production release or independent assessment is claimed.

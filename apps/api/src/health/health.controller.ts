@@ -5,8 +5,16 @@ import { PrismaService } from "../database/prisma.service.js";
 export class HealthController {
   constructor(private readonly prisma: PrismaService) {}
 
-  @Get()
-  async check() {
+  @Get("live")
+  live() {
+    return {
+      status: "ok",
+      service: "serviceflow-api",
+    };
+  }
+
+  @Get("ready")
+  async ready() {
     await this.prisma.$queryRaw`SELECT 1`;
 
     return {
@@ -14,5 +22,10 @@ export class HealthController {
       service: "serviceflow-api",
       database: "ok",
     };
+  }
+
+  @Get()
+  async check() {
+    return this.ready();
   }
 }

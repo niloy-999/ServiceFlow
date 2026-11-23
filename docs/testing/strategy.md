@@ -7,6 +7,7 @@
 - **Unit tests:** Node's built-in test runner against compiled API output. These cover password handling, CSRF/origin, cookies, session guard, MFA crypto/key rotation, runtime configuration/log redaction, and other isolated logic.
 - **PostgreSQL integration tests:** Node test runner and real PostgreSQL, with an application connection and separate migration/fixture connection. SQLite is not an acceptable substitute for RLS, grants, transaction-local context, PostgreSQL functions or constraints.
 - **Builds:** API Prisma generation/TypeScript compilation and Next.js production build.
+- **Operations-focused unit coverage:** liveness/readiness dependency behavior, request correlation and log redaction, and the local email adapter's provider boundary and filesystem permissions.
 
 ## Commands
 
@@ -25,6 +26,8 @@ From repository root, use `./scripts/pnpm.sh` so Corepack selects the repository
 Identity integration coverage includes registration and email verification, password reset expiry/single-use/session revocation, session lifecycle, MFA challenges/recovery, rate limits, and tenant RLS. Password reset assertions verify that only token hashes are persisted and that invalid or consumed links have generic responses.
 
 The root `ci:check` aggregates formatting, typechecking, unit tests, and builds. It does not imply PostgreSQL integration tests passed. CI runs those separately against an ephemeral service.
+
+For a local PostgreSQL backup/restore drill, use the procedures in [operational readiness](../operations/operational-readiness.md). The drill must use an isolated source and newly generated restore database; never point it at production or reuse an existing target.
 
 ## Security-focused test gates
 

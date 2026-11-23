@@ -46,8 +46,16 @@ if [ "$1" = up ]; then
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --quiet
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d db
   volume_identity=$(docker volume inspect --format '{{.Name}}|{{.CreatedAt}}' "$VOLUME_NAME")
-  mkdir -p "$STATE_DIR"
-  (set -C; printf '%s' "$volume_identity" > "$VOLUME_MARKER")
+  if [ -f "$VOLUME_MARKER" ]; then
+    marker_identity=$(cat "$VOLUME_MARKER")
+    if [ "$volume_identity" != "$marker_identity" ]; then
+      printf '%s\n' "Refusing to update ownership state: volume '$VOLUME_NAME' changed during startup." >&2
+      exit 1
+    fi
+  else
+    mkdir -p "$STATE_DIR"
+    (set -C; printf '%s' "$volume_identity" > "$VOLUME_MARKER")
+  fi
 else
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" stop db
 fi

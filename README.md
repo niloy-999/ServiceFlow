@@ -33,7 +33,7 @@ Install the exact committed workspace dependency graph:
 
 ## Local PostgreSQL
 
-The local Compose configuration is opt-in and binds PostgreSQL to loopback only. It creates separate bootstrap, migration, and runtime roles and separate development, test, and shadow databases. Runtime and migration roles use UTC session time. Bootstrap credentials are only used during initialization; the API must use the restricted runtime role and Prisma migrations must use the migration role.
+The local Compose configuration is opt-in and binds PostgreSQL to loopback only. It uses conservative 1 GiB/1.5 CPU limits and creates separate bootstrap, migration, and runtime roles and separate development, test, and shadow databases. Runtime and migration roles use UTC session time. Bootstrap credentials are only used during initialization; the API must use the restricted runtime role and Prisma migrations must use the migration role.
 
 1. Review `.env.local.example` (it contains placeholders, not usable credentials).
 2. Create `.env.local` only if it does not already exist, then replace every placeholder with unique local credentials. Never copy over an existing environment file.
@@ -66,7 +66,9 @@ The integration test database is separate. Before integration tests, set `DATABA
 ./scripts/pnpm.sh --filter @serviceflow/api start
 ```
 
-The API requires its documented environment values and a migrated PostgreSQL database. Its health endpoint is `/api/v1/health` and checks PostgreSQL connectivity. The API emits JSON startup/framework logs and defaults to loopback binding; set `API_HOST=0.0.0.0` only when a container network or reverse proxy requires it. `PORT` is validated as an integer from 1 through 65535.
+The API requires its documented environment values and a migrated PostgreSQL database. `/api/v1/health/live` checks process liveness without PostgreSQL; `/api/v1/health/ready` checks PostgreSQL connectivity. `/api/v1/health` remains a readiness alias. HTTP requests receive a generated `X-Request-Id`; structured records omit query strings, bodies and error messages. The API defaults to loopback binding; set `API_HOST=0.0.0.0` only when a container network or reverse proxy requires it. `PORT` is validated as an integer from 1 through 65535.
+
+Email is development-only and writes messages to ignored `.local/mail` files. A production email provider is not configured. See [operational readiness](docs/operations/operational-readiness.md) for the local backup/restore drill and deployment limitations.
 
 Available root checks:
 
