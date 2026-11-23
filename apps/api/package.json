@@ -15,7 +15,9 @@
     "test:business-registration": "node --test test/business-registration.integration.mjs",
     "test:mfa-crypto": "node --test test/mfa-crypto.service.test.mjs",
     "test:mfa-challenge": "node --test test/mfa-challenge.integration.mjs",
-    "test:global-identity-context": "node --test test/global-identity-context.integration.mjs"
+    "test:global-identity-context": "node --test test/global-identity-context.integration.mjs",
+    "mfa:rotate-keys": "node scripts/rotate-mfa-encryption-keys.mjs",
+    "test:mfa-key-rotation": "node --test test/rotate-mfa-encryption-keys.test.mjs"
   },
   "dependencies": {
     "@nestjs/common": "12.5.1",

@@ -101,7 +101,9 @@ before(async () => {
   assert.ok(process.env.MIGRATION_DATABASE_URL);
   assert.ok(process.env.WEB_APP_URL);
   assert.ok(process.env.CSRF_HMAC_SECRET);
-  assert.ok(process.env.MFA_ENCRYPTION_KEY);
+  assert.ok(
+    process.env.MFA_ENCRYPTION_KEYS || process.env.MFA_ENCRYPTION_KEY,
+  );
 
   migrator = new Client({
     connectionString: process.env.MIGRATION_DATABASE_URL,

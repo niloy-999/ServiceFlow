@@ -10,6 +10,9 @@ import {
 } from "node:crypto";
 
 const ENCRYPTION_ALGORITHM = "aes-256-gcm";
+const ENVELOPE_MAGIC = Buffer.from("SFMFAENV", "ascii");
+const ENVELOPE_VERSION = 1;
+const MAX_KEY_ID_LENGTH = 32;
 const NONCE_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
 const TOTP_PERIOD_SECONDS = 30;
@@ -19,22 +22,96 @@ const TOTP_SECRET_LENGTH = 20;
 
 @Injectable()
 export class MfaCryptoService {
-  private readonly encryptionKey: Buffer;
+  private readonly encryptionKeys = new Map<string, Buffer>();
+  private readonly activeKeyId: string;
+  private readonly legacyKeyId: string;
 
   constructor() {
-    const configuredKey = process.env.MFA_ENCRYPTION_KEY;
+    const configuredKeyring = process.env.MFA_ENCRYPTION_KEYS;
+    const configuredLegacyKeyId = process.env.MFA_ENCRYPTION_LEGACY_KEY_ID;
+    const configuredActiveKeyId = process.env.MFA_ENCRYPTION_ACTIVE_KEY_ID;
 
-    if (!configuredKey) {
-      throw new Error("MFA_ENCRYPTION_KEY is not configured.");
+    let keyEntries: Array<[string, unknown]>;
+
+    if (configuredKeyring !== undefined) {
+      if (process.env.MFA_ENCRYPTION_KEY !== undefined) {
+        throw new Error(
+          "MFA_ENCRYPTION_KEY must not be configured alongside MFA_ENCRYPTION_KEYS.",
+        );
+      }
+
+      let parsed: unknown;
+
+      try {
+        parsed = JSON.parse(configuredKeyring);
+      } catch {
+        throw new Error("MFA_ENCRYPTION_KEYS must be a valid JSON keyring.");
+      }
+
+      if (
+        parsed === null ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed)
+      ) {
+        throw new Error("MFA_ENCRYPTION_KEYS must be a JSON object.");
+      }
+
+      keyEntries = Object.entries(parsed as Record<string, unknown>);
+    } else {
+      const configuredKey = process.env.MFA_ENCRYPTION_KEY;
+
+      if (!configuredKey) {
+        throw new Error(
+          "MFA_ENCRYPTION_KEYS or the temporary MFA_ENCRYPTION_KEY fallback is required.",
+        );
+      }
+
+      keyEntries = [[configuredLegacyKeyId ?? "v1", configuredKey]];
     }
 
-    const decodedKey = Buffer.from(configuredKey, "base64");
+    for (const [keyId, encodedKey] of keyEntries) {
+      if (
+        !/^[A-Za-z0-9_-]{1,32}$/.test(keyId) ||
+        typeof encodedKey !== "string"
+      ) {
+        throw new Error("MFA encryption keyring contains an invalid entry.");
+      }
 
-    if (decodedKey.length !== 32 || decodedKey.toString("base64") !== configuredKey) {
-      throw new Error("MFA_ENCRYPTION_KEY must be a canonical base64-encoded 32-byte key.");
+      const decodedKey = Buffer.from(encodedKey, "base64");
+
+      if (
+        decodedKey.length !== 32 ||
+        decodedKey.toString("base64") !== encodedKey
+      ) {
+        throw new Error(
+          `MFA encryption key "${keyId}" must be canonical base64 for a 32-byte key.`,
+        );
+      }
+
+      this.encryptionKeys.set(keyId, decodedKey);
     }
 
-    this.encryptionKey = decodedKey;
+    if (this.encryptionKeys.size === 0) {
+      throw new Error("MFA encryption keyring must not be empty.");
+    }
+
+    this.legacyKeyId = configuredLegacyKeyId ?? "v1";
+    this.activeKeyId = configuredActiveKeyId ?? this.legacyKeyId;
+
+    if (
+      !/^[A-Za-z0-9_-]{1,32}$/.test(this.legacyKeyId) ||
+      !/^[A-Za-z0-9_-]{1,32}$/.test(this.activeKeyId)
+    ) {
+      throw new Error("MFA active and legacy key IDs are invalid.");
+    }
+
+    if (!this.encryptionKeys.has(this.legacyKeyId)) {
+      throw new Error("Configured legacy MFA encryption key is missing.");
+    }
+
+    if (!this.encryptionKeys.has(this.activeKeyId)) {
+      throw new Error("Configured active MFA encryption key is missing.");
+    }
   }
 
   generateTotpSecret(): Buffer {
@@ -141,31 +218,149 @@ export class MfaCryptoService {
       throw new TypeError("A non-empty MFA secret is required.");
     }
 
-    const nonce = randomBytes(NONCE_LENGTH);
-    const cipher = createCipheriv(ENCRYPTION_ALGORITHM, this.encryptionKey, nonce);
+    const key = this.encryptionKeys.get(this.activeKeyId)!;
+    const keyIdBytes = Buffer.from(this.activeKeyId, "ascii");
 
-    const ciphertext = Buffer.concat([cipher.update(secret), cipher.final()]);
+    const header = Buffer.concat([
+      ENVELOPE_MAGIC,
+      Buffer.from([ENVELOPE_VERSION, keyIdBytes.length]),
+      keyIdBytes,
+    ]);
+
+    const nonce = randomBytes(NONCE_LENGTH);
+    const cipher = createCipheriv(ENCRYPTION_ALGORITHM, key, nonce);
+
+    cipher.setAAD(header);
+
+    const ciphertext = Buffer.concat([
+      cipher.update(secret),
+      cipher.final(),
+    ]);
 
     const authTag = cipher.getAuthTag();
 
-    return Buffer.concat([nonce, authTag, ciphertext]);
+    return Buffer.concat([header, nonce, authTag, ciphertext]);
   }
 
-  decryptSecret(encrypted: Buffer): Buffer {
-    if (!Buffer.isBuffer(encrypted) || encrypted.length < NONCE_LENGTH + AUTH_TAG_LENGTH + 1) {
+  getEncryptedSecretKeyId(encrypted: Buffer): string | null {
+    if (!Buffer.isBuffer(encrypted)) {
       throw new TypeError("Invalid encrypted MFA secret.");
     }
 
-    const nonce = encrypted.subarray(0, NONCE_LENGTH);
-    const authTag = encrypted.subarray(NONCE_LENGTH, NONCE_LENGTH + AUTH_TAG_LENGTH);
-    const ciphertext = encrypted.subarray(NONCE_LENGTH + AUTH_TAG_LENGTH);
+    if (encrypted.length < NONCE_LENGTH + AUTH_TAG_LENGTH + 1) {
+      throw new TypeError("Invalid encrypted MFA secret.");
+    }
+
+    const hasEnvelopeMagic =
+      encrypted.length >= ENVELOPE_MAGIC.length &&
+      encrypted.subarray(0, ENVELOPE_MAGIC.length).equals(ENVELOPE_MAGIC);
+
+    if (!hasEnvelopeMagic) {
+      return null;
+    }
+
+    const fixedHeaderLength = ENVELOPE_MAGIC.length + 2;
+
+    if (encrypted.length < fixedHeaderLength) {
+      throw new TypeError("Invalid MFA encryption envelope.");
+    }
+
+    const version = encrypted[ENVELOPE_MAGIC.length]!;
+    const keyIdLength = encrypted[ENVELOPE_MAGIC.length + 1]!;
+
+    if (
+      version !== ENVELOPE_VERSION ||
+      keyIdLength < 1 ||
+      keyIdLength > MAX_KEY_ID_LENGTH
+    ) {
+      throw new TypeError("Invalid MFA encryption envelope.");
+    }
+
+    const headerLength = fixedHeaderLength + keyIdLength;
+    const minimumLength =
+      headerLength + NONCE_LENGTH + AUTH_TAG_LENGTH + 1;
+
+    if (encrypted.length < minimumLength) {
+      throw new TypeError("Invalid MFA encryption envelope.");
+    }
+
+    const keyIdBytes = encrypted.subarray(fixedHeaderLength, headerLength);
+    const keyId = keyIdBytes.toString("ascii");
+
+    if (
+      !/^[A-Za-z0-9_-]{1,32}$/.test(keyId) ||
+      !Buffer.from(keyId, "ascii").equals(keyIdBytes)
+    ) {
+      throw new TypeError("Invalid MFA encryption envelope.");
+    }
+
+    return keyId;
+  }
+
+  isEncryptedSecretCurrent(encrypted: Buffer): boolean {
+    return this.getEncryptedSecretKeyId(encrypted) === this.activeKeyId;
+  }
+
+  decryptSecret(encrypted: Buffer): Buffer {
+    const keyId = this.getEncryptedSecretKeyId(encrypted);
+    const isLegacy = keyId === null;
+    const selectedKeyId = keyId ?? this.legacyKeyId;
+    const key = this.encryptionKeys.get(selectedKeyId);
+
+    if (!key) {
+      throw new Error("Unable to decrypt MFA secret.");
+    }
 
     try {
-      const decipher = createDecipheriv(ENCRYPTION_ALGORITHM, this.encryptionKey, nonce);
+      let header: Buffer;
+      let nonce: Buffer;
+      let authTag: Buffer;
+      let ciphertext: Buffer;
+
+      if (isLegacy) {
+        header = Buffer.alloc(0);
+        nonce = encrypted.subarray(0, NONCE_LENGTH);
+        authTag = encrypted.subarray(
+          NONCE_LENGTH,
+          NONCE_LENGTH + AUTH_TAG_LENGTH,
+        );
+        ciphertext = encrypted.subarray(
+          NONCE_LENGTH + AUTH_TAG_LENGTH,
+        );
+      } else {
+        const keyIdLength = encrypted[ENVELOPE_MAGIC.length + 1]!;
+        const headerLength = ENVELOPE_MAGIC.length + 2 + keyIdLength;
+
+        header = encrypted.subarray(0, headerLength);
+        nonce = encrypted.subarray(
+          headerLength,
+          headerLength + NONCE_LENGTH,
+        );
+        authTag = encrypted.subarray(
+          headerLength + NONCE_LENGTH,
+          headerLength + NONCE_LENGTH + AUTH_TAG_LENGTH,
+        );
+        ciphertext = encrypted.subarray(
+          headerLength + NONCE_LENGTH + AUTH_TAG_LENGTH,
+        );
+      }
+
+      const decipher = createDecipheriv(
+        ENCRYPTION_ALGORITHM,
+        key,
+        nonce,
+      );
+
+      if (!isLegacy) {
+        decipher.setAAD(header);
+      }
 
       decipher.setAuthTag(authTag);
 
-      return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      return Buffer.concat([
+        decipher.update(ciphertext),
+        decipher.final(),
+      ]);
     } catch {
       throw new Error("Unable to decrypt MFA secret.");
     }

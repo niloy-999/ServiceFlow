@@ -1,19 +1,112 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createCipheriv, randomBytes } from "node:crypto";
 import { test } from "node:test";
 
+delete process.env.MFA_ENCRYPTION_KEYS;
+delete process.env.MFA_ENCRYPTION_ACTIVE_KEY_ID;
+delete process.env.MFA_ENCRYPTION_LEGACY_KEY_ID;
 process.env.MFA_ENCRYPTION_KEY ??= randomBytes(32).toString("base64");
 
 const { MfaCryptoService } = await import("../dist/identity/mfa-crypto.service.js");
 
 const mfa = new MfaCryptoService();
 
+function createConfiguredService(keys, activeKeyId, legacyKeyId) {
+  const names = [
+    "MFA_ENCRYPTION_KEY",
+    "MFA_ENCRYPTION_KEYS",
+    "MFA_ENCRYPTION_ACTIVE_KEY_ID",
+    "MFA_ENCRYPTION_LEGACY_KEY_ID",
+  ];
+  const previous = Object.fromEntries(
+    names.map((name) => [name, process.env[name]]),
+  );
+
+  try {
+    delete process.env.MFA_ENCRYPTION_KEY;
+    process.env.MFA_ENCRYPTION_KEYS = JSON.stringify(
+      Object.fromEntries(
+        Object.entries(keys).map(([id, key]) => [
+          id,
+          key.toString("base64"),
+        ]),
+      ),
+    );
+    process.env.MFA_ENCRYPTION_ACTIVE_KEY_ID = activeKeyId;
+    process.env.MFA_ENCRYPTION_LEGACY_KEY_ID = legacyKeyId;
+
+    return new MfaCryptoService();
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = previous[name];
+      }
+    }
+  }
+}
+
+function assertInvalidKeyringConfiguration(
+  { keyring, legacyKey, activeKeyId = "v2", legacyKeyId = "v1" },
+  expectedError,
+) {
+  const names = [
+    "MFA_ENCRYPTION_KEY",
+    "MFA_ENCRYPTION_KEYS",
+    "MFA_ENCRYPTION_ACTIVE_KEY_ID",
+    "MFA_ENCRYPTION_LEGACY_KEY_ID",
+  ];
+  const previous = Object.fromEntries(
+    names.map((name) => [name, process.env[name]]),
+  );
+
+  try {
+    for (const name of names) {
+      delete process.env[name];
+    }
+
+    if (keyring !== undefined) {
+      process.env.MFA_ENCRYPTION_KEYS = keyring;
+    }
+    if (legacyKey !== undefined) {
+      process.env.MFA_ENCRYPTION_KEY = legacyKey;
+    }
+
+    process.env.MFA_ENCRYPTION_ACTIVE_KEY_ID = activeKeyId;
+    process.env.MFA_ENCRYPTION_LEGACY_KEY_ID = legacyKeyId;
+
+    assert.throws(() => new MfaCryptoService(), expectedError);
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = previous[name];
+      }
+    }
+  }
+}
+
+function encryptLegacySecret(secret, key) {
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  const ciphertext = Buffer.concat([
+    cipher.update(secret),
+    cipher.final(),
+  ]);
+
+  return Buffer.concat([nonce, cipher.getAuthTag(), ciphertext]);
+}
+
 test("AES-256-GCM encrypts and decrypts an MFA secret", () => {
   const secret = randomBytes(20);
   const encrypted = mfa.encryptSecret(secret);
 
   assert.ok(Buffer.isBuffer(encrypted));
-  assert.equal(encrypted.length, 20 + 12 + 16);
+  assert.equal(mfa.getEncryptedSecretKeyId(encrypted), "v1");
+  assert.equal(mfa.isEncryptedSecretCurrent(encrypted), true);
+  assert.ok(encrypted.length > 20 + 12 + 16);
   assert.deepEqual(mfa.decryptSecret(encrypted), secret);
   assert.notDeepEqual(encrypted, secret);
 });
@@ -32,11 +125,21 @@ test("Encryption uses a fresh nonce for every operation", () => {
 test("AES-GCM rejects modified ciphertext and authentication tags", () => {
   const encrypted = mfa.encryptSecret(randomBytes(20));
 
-  for (const index of [0, 12, encrypted.length - 1]) {
+  const headerLength = 8 + 2 + 2;
+  const nonceOffset = headerLength;
+  const authTagOffset = nonceOffset + 12;
+
+  for (const index of [
+    0,
+    8,
+    nonceOffset,
+    authTagOffset,
+    encrypted.length - 1,
+  ]) {
     const modified = Buffer.from(encrypted);
     modified[index] ^= 0x01;
 
-    assert.throws(() => mfa.decryptSecret(modified), /Unable to decrypt MFA secret/);
+    assert.throws(() => mfa.decryptSecret(modified));
   }
 });
 
@@ -44,6 +147,122 @@ test("Malformed encrypted secrets are rejected", () => {
   for (const value of [Buffer.alloc(0), Buffer.alloc(28)]) {
     assert.throws(() => mfa.decryptSecret(value));
   }
+});
+
+test("Legacy nonce-tag-ciphertext secrets remain decryptable", () => {
+  const key = Buffer.from(process.env.MFA_ENCRYPTION_KEY, "base64");
+  const secret = randomBytes(20);
+  const legacy = encryptLegacySecret(secret, key);
+
+  assert.equal(mfa.getEncryptedSecretKeyId(legacy), null);
+  assert.equal(mfa.isEncryptedSecretCurrent(legacy), false);
+  assert.deepEqual(mfa.decryptSecret(legacy), secret);
+});
+
+test("Multiple configured keys decrypt legacy and versioned secrets", () => {
+  const keyV1 = randomBytes(32);
+  const keyV2 = randomBytes(32);
+  const secret = randomBytes(20);
+
+  const v1Service = createConfiguredService(
+    { v1: keyV1, v2: keyV2 },
+    "v1",
+    "v1",
+  );
+  const legacy = encryptLegacySecret(secret, keyV1);
+  const versionedV1 = v1Service.encryptSecret(secret);
+
+  const v2Service = createConfiguredService(
+    { v1: keyV1, v2: keyV2 },
+    "v2",
+    "v1",
+  );
+  const versionedV2 = v2Service.encryptSecret(secret);
+
+  assert.deepEqual(v2Service.decryptSecret(legacy), secret);
+  assert.deepEqual(v2Service.decryptSecret(versionedV1), secret);
+  assert.deepEqual(v2Service.decryptSecret(versionedV2), secret);
+
+  assert.equal(v2Service.getEncryptedSecretKeyId(versionedV1), "v1");
+  assert.equal(v2Service.getEncryptedSecretKeyId(versionedV2), "v2");
+  assert.equal(v2Service.isEncryptedSecretCurrent(versionedV1), false);
+  assert.equal(v2Service.isEncryptedSecretCurrent(versionedV2), true);
+});
+
+test("Unknown envelope key IDs are rejected", () => {
+  const keyV1 = randomBytes(32);
+  const keyV2 = randomBytes(32);
+
+  const v1Service = createConfiguredService(
+    { v1: keyV1 },
+    "v1",
+    "v1",
+  );
+  const encrypted = v1Service.encryptSecret(randomBytes(20));
+
+  // The key ID begins immediately after the 8-byte magic and 2-byte header.
+  encrypted[10] = "z".charCodeAt(0);
+
+  const v2OnlyService = createConfiguredService(
+    { v2: keyV2 },
+    "v2",
+    "v2",
+  );
+
+  assert.equal(v2OnlyService.getEncryptedSecretKeyId(encrypted), "z1");
+  assert.throws(
+    () => v2OnlyService.decryptSecret(encrypted),
+    /Unable to decrypt MFA secret/,
+  );
+});
+
+test("Versioned envelope key IDs are authenticated", () => {
+  const keyV1 = randomBytes(32);
+  const keyV2 = randomBytes(32);
+  const secret = randomBytes(20);
+
+  const service = createConfiguredService(
+    { v1: keyV1, v2: keyV2 },
+    "v1",
+    "v1",
+  );
+
+  const encrypted = service.encryptSecret(secret);
+
+  // Preserve the envelope structure but change its key ID from v1 to v2.
+  encrypted[10] = "v".charCodeAt(0);
+  encrypted[11] = "2".charCodeAt(0);
+
+  const multiKeyService = createConfiguredService(
+    { v1: keyV1, v2: keyV2 },
+    "v2",
+    "v1",
+  );
+
+  assert.equal(multiKeyService.getEncryptedSecretKeyId(encrypted), "v2");
+  assert.throws(
+    () => multiKeyService.decryptSecret(encrypted),
+    /Unable to decrypt MFA secret/,
+  );
+});
+
+test("Malformed versioned envelope headers are rejected", () => {
+  const encrypted = mfa.encryptSecret(randomBytes(20));
+
+  const invalidVersion = Buffer.from(encrypted);
+  invalidVersion[8] = 0xff;
+
+  const invalidKeyIdLength = Buffer.from(encrypted);
+  invalidKeyIdLength[9] = 0xff;
+
+  assert.throws(
+    () => mfa.getEncryptedSecretKeyId(invalidVersion),
+    /Invalid MFA encryption envelope/,
+  );
+  assert.throws(
+    () => mfa.getEncryptedSecretKeyId(invalidKeyIdLength),
+    /Invalid MFA encryption envelope/,
+  );
 });
 
 test("TOTP generation matches RFC 6238 SHA-1 test vectors", () => {
@@ -136,14 +355,68 @@ test("MFA encryption key must be a valid base64-encoded 32-byte key", () => {
   const original = process.env.MFA_ENCRYPTION_KEY;
 
   try {
-    for (const invalidKey of ["", "not-base64", randomBytes(16).toString("base64")]) {
+    for (const invalidKey of [
+      "",
+      "not-base64",
+      randomBytes(16).toString("base64"),
+    ]) {
       process.env.MFA_ENCRYPTION_KEY = invalidKey;
 
-      assert.throws(() => new MfaCryptoService(), /MFA_ENCRYPTION_KEY/);
+      assert.throws(() => new MfaCryptoService(), /MFA/);
     }
   } finally {
     process.env.MFA_ENCRYPTION_KEY = original;
   }
+});
+
+test("MFA keyring rejects ambiguous and malformed configuration", () => {
+  const validKey = randomBytes(32).toString("base64");
+
+  assertInvalidKeyringConfiguration(
+    {
+      keyring: JSON.stringify({ v1: validKey, v2: validKey }),
+      legacyKey: validKey,
+    },
+    /must not be configured alongside/,
+  );
+
+  assertInvalidKeyringConfiguration(
+    { keyring: "{", },
+    /valid JSON keyring/,
+  );
+
+  assertInvalidKeyringConfiguration(
+    { keyring: "[]", },
+    /JSON object/,
+  );
+
+  assertInvalidKeyringConfiguration(
+    {
+      keyring: JSON.stringify({ v1: validKey.slice(0, -1), v2: validKey }),
+    },
+    /canonical base64/,
+  );
+
+  assertInvalidKeyringConfiguration(
+    {
+      keyring: JSON.stringify({ "bad.id": validKey, v2: validKey }),
+    },
+    /invalid entry/,
+  );
+});
+
+test("MFA keyring rejects missing active and legacy keys", () => {
+  const key = randomBytes(32);
+
+  assert.throws(
+    () => createConfiguredService({ v1: key }, "v2", "v1"),
+    /active MFA encryption key is missing/,
+  );
+
+  assert.throws(
+    () => createConfiguredService({ v2: key }, "v2", "v1"),
+    /legacy MFA encryption key is missing/,
+  );
 });
 
 test("TOTP secrets contain 160 bits of cryptographic randomness", () => {
