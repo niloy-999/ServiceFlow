@@ -1,6 +1,6 @@
 # ServiceFlow
 
-ServiceFlow is an early-stage multi-tenant SaaS platform for computer retail shops and repair/service centres. This repository currently contains the engineering foundation and identity/business onboarding flows; POS, inventory, repair workflows, payments, AI, and customer portal workflows are not implemented.
+ServiceFlow is an early-stage multi-tenant SaaS platform for computer retail shops and repair/service centres. The current 0.2 release work includes identity/business onboarding and the tenant-scoped product catalogue. Branch inventory, purchasing, transfers, POS, repair workflows, payments, AI, and customer portal workflows are not implemented yet.
 
 ## Technology
 
@@ -94,4 +94,4 @@ Integration tests require the isolated PostgreSQL test databases and required te
 
 ## Project status
 
-The schema currently defines 18 Prisma models and one enum. This is a partial foundation, not a commercial product or production deployment. Review the [extended Phase 1 roadmap](docs/roadmap/PHASE_1_EXTENDED_IMPLEMENTATION_ROADMAP.md) for verified, partial, missing, and execution-unverified work.
+The schema currently defines 25 Prisma models and five enums, including catalogue records. This is a partial foundation, not a commercial product or production deployment. Review the [Phase 2 roadmap](docs/roadmap/PHASE_2_IMPLEMENTATION_ROADMAP.md) for milestone status and deferred scope, and the [extended Phase 1 roadmap](docs/roadmap/PHASE_1_EXTENDED_IMPLEMENTATION_ROADMAP.md) for foundation evidence.

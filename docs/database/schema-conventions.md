@@ -2,7 +2,7 @@
 
 ## Current schema
 
-`apps/api/prisma/schema.prisma` currently defines 19 models and two enums. The schema covers identity, businesses and membership, access foundations, session and one-time token lifecycle, rate limits, platform-administrator grants, MFA lifecycle records, branch scopes and audit events. Catalogue, physical inventory, purchasing, receiving, transfers, repair, payment and customer-portal domain tables are still being implemented for 0.2 or later releases.
+`apps/api/prisma/schema.prisma` currently defines 25 models and five enums. Alongside identity, business membership, access, session/token lifecycle, rate limits, platform-administrator grants, MFA and audit records, it now includes categories, brands, products, variants, identifiers and price history. Physical inventory, suppliers, purchasing, receiving, transfers, repair, payment and customer-portal tables remain for later 0.2 milestones or future releases.
 
 ## Conventions in use
 
@@ -13,10 +13,13 @@
 - Tenant-scoped rows carry `tenant_id`. Composite unique keys and foreign keys include tenant identity where relationships must not cross tenants (for example membership-role and role-permission links).
 - `membership_branch_scopes` uses tenant-composite membership and branch foreign keys. Partial unique indexes separately enforce one business-wide scope and one scope per branch because nullable columns do not provide the intended uniqueness semantics.
 - Permission identifiers are stable strings defined by the API permission catalogue and seeded in migration history. Runtime access to the permission table is read-only; migrations own additions. Branch visibility and ability to operate are distinct persisted flags.
+- Catalogue entities use tenant-composite foreign keys for tenant-owned relationships. Product variants are canonical stock identities; the database enforces a single active default variant per product at commit. Tenant SKU and identifier uniqueness is normalized and enforced by PostgreSQL.
+- Catalogue prices use non-negative integer minor units and uppercase three-letter currency codes. Price history is append-only except that an open row may be closed once by setting `valid_to`; runtime access cannot delete price history.
+- Catalogue records are archived rather than physically deleted through the runtime role. Product and variant edits use optimistic versions.
 - Foreign keys generally use `RESTRICT` for business ownership links. Identity session/token records use explicit lifecycle and cascade/restrict choices visible in the schema.
 - Important lookup and lifecycle fields have indexes; add indexes based on concrete query patterns and measured plans.
 - State-like string fields are used in several models; validate transitions in application logic and add constraints when the allowed state set is stable.
-- Money/stock conventions are not established because those domains do not exist yet. When implemented, use exact numeric representations and transactional ledgers per the Phase 0 specification.
+- Stock quantities are not implemented yet. When implemented, use integer base units and a transactional movement ledger with balance projections per the Phase 0 specification.
 
 ## Migrations and roles
 

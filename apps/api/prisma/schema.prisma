@@ -20,6 +20,22 @@ enum BranchScopeType {
   BRANCH
 }
 
+enum ProductKind {
+  RETAIL
+  REPAIR_PART
+  BOTH
+}
+
+enum CatalogueStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum ProductIdentifierType {
+  BARCODE
+  ALTERNATE
+}
+
 model User {
   id              String    @id @default(uuid()) @db.Uuid
   emailNormalized String    @unique @map("email_normalized") @db.VarChar(320)
@@ -63,6 +79,9 @@ model Business {
   branches    Branch[]
   roles       Role[]
   auditEvents AuditEvent[]
+  categories  Category[]
+  brands      Brand[]
+  products    Product[]
 
   @@map("businesses")
 }
@@ -184,6 +203,135 @@ model MembershipBranchScope {
 
   @@index([tenantId, membershipId])
   @@map("membership_branch_scopes")
+}
+
+model Category {
+  id        String          @id @default(uuid()) @db.Uuid
+  tenantId  String          @map("tenant_id") @db.Uuid
+  parentId  String?         @map("parent_id") @db.Uuid
+  name      String          @db.VarChar(120)
+  slug      String          @db.VarChar(140)
+  status    CatalogueStatus @default(ACTIVE)
+  createdAt DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business Business   @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  parent   Category?  @relation("CategoryTree", fields: [tenantId, parentId], references: [tenantId, id], onDelete: Restrict)
+  children Category[] @relation("CategoryTree")
+  products Product[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, slug])
+  @@index([tenantId, parentId, status])
+  @@map("categories")
+}
+
+model Brand {
+  id             String          @id @default(uuid()) @db.Uuid
+  tenantId       String          @map("tenant_id") @db.Uuid
+  name           String          @db.VarChar(120)
+  nameNormalized String          @map("name_normalized") @db.VarChar(120)
+  status         CatalogueStatus @default(ACTIVE)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business Business  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  products Product[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, nameNormalized])
+  @@index([tenantId, status, name])
+  @@map("brands")
+}
+
+model Product {
+  id           String          @id @default(uuid()) @db.Uuid
+  tenantId     String          @map("tenant_id") @db.Uuid
+  productCode  String          @map("product_code") @db.VarChar(64)
+  name         String          @db.VarChar(180)
+  description  String?         @db.VarChar(2000)
+  productKind  ProductKind     @map("product_kind")
+  categoryId   String?         @map("category_id") @db.Uuid
+  brandId      String?         @map("brand_id") @db.Uuid
+  trackSerials Boolean         @default(false) @map("track_serials")
+  status       CatalogueStatus @default(ACTIVE)
+  createdAt    DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version      BigInt          @default(1)
+
+  business    Business            @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  category    Category?           @relation(fields: [tenantId, categoryId], references: [tenantId, id], onDelete: Restrict)
+  brand       Brand?              @relation(fields: [tenantId, brandId], references: [tenantId, id], onDelete: Restrict)
+  variants    ProductVariant[]
+  identifiers ProductIdentifier[]
+  prices      ProductPrice[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, productCode])
+  @@index([tenantId, status, name])
+  @@index([tenantId, categoryId])
+  @@index([tenantId, brandId])
+  @@map("products")
+}
+
+model ProductVariant {
+  id          String          @id @default(uuid()) @db.Uuid
+  tenantId    String          @map("tenant_id") @db.Uuid
+  productId   String          @map("product_id") @db.Uuid
+  variantCode String          @map("variant_code") @db.VarChar(64)
+  sku         String          @db.VarChar(100)
+  name        String          @db.VarChar(180)
+  attributes  Json            @default("{}") @db.JsonB
+  isDefault   Boolean         @default(false) @map("is_default")
+  status      CatalogueStatus @default(ACTIVE)
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version     BigInt          @default(1)
+
+  product     Product             @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict)
+  identifiers ProductIdentifier[]
+  prices      ProductPrice[]
+
+  @@unique([tenantId, productId, id])
+  @@unique([tenantId, productId, variantCode])
+  @@index([tenantId, productId, status])
+  @@map("product_variants")
+}
+
+model ProductIdentifier {
+  id              String                @id @default(uuid()) @db.Uuid
+  tenantId        String                @map("tenant_id") @db.Uuid
+  productId       String                @map("product_id") @db.Uuid
+  variantId       String                @map("variant_id") @db.Uuid
+  identifierType  ProductIdentifierType @map("identifier_type")
+  valueNormalized String                @map("value_normalized") @db.VarChar(160)
+  createdAt       DateTime              @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  product Product        @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict)
+  variant ProductVariant @relation(fields: [tenantId, productId, variantId], references: [tenantId, productId, id], onDelete: Restrict)
+
+  @@unique([tenantId, identifierType, valueNormalized])
+  @@unique([tenantId, id])
+  @@index([tenantId, variantId])
+  @@map("product_identifiers")
+}
+
+model ProductPrice {
+  id          String    @id @default(uuid()) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
+  productId   String    @map("product_id") @db.Uuid
+  variantId   String    @map("variant_id") @db.Uuid
+  currency    String    @db.Char(3)
+  amountMinor BigInt    @map("amount_minor")
+  validFrom   DateTime  @default(now()) @map("valid_from") @db.Timestamptz(3)
+  validTo     DateTime? @map("valid_to") @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  product Product        @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict)
+  variant ProductVariant @relation(fields: [tenantId, productId, variantId], references: [tenantId, productId, id], onDelete: Restrict)
+
+  @@index([tenantId, variantId, validFrom])
+  @@map("product_prices")
 }
 
 model AuthSession {

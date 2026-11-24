@@ -20,17 +20,19 @@ POS, sales, customer orders, payments, invoices/refunds, repairs/parts consumpti
 
 **Verified:** `20261124090000_business_authorization_foundation` and `20261124100000_platform_activation_mfa_check` applied to local `serviceflow_dev` and isolated `serviceflow_test`. The full PostgreSQL integration suite passed **79/79** after the owner MFA/RLS correction. Coverage includes pending registration, MFA-authenticated platform activation, rejected non-admin activation, initial branch/owner/system-role/business-scope creation, activation audit, duplicate activation rejection, membership discovery, cross-tenant denial and separate branch visibility/operation scope. `AuthorizationService` executes protected callbacks in the same tenant transaction as permission and scope evaluation.
 
-**Remaining:** Run root unit/type/build checks and CI against the committed milestone. Fresh CI migrations will be verified by the workflow. Role and membership-management APIs are not part of this initial activation foundation; no employee grant/removal API exists yet. The activation migration was applied locally and is additive; this is not independent security testing or production verification.
+**Verified:** Full root quality checks and the Phase 1 CI run passed for the M0 commit; the CI job applied migrations to its ephemeral PostgreSQL service and ran the integration suite. Role and membership-management APIs are not part of this initial activation foundation; no employee grant/removal API exists yet. The activation migration was applied locally and is additive; this is not independent security testing or production verification.
 
 ### M1 — Catalogue
 
-**Status:** Not implemented. **Dependencies:** M0 authorization and tenant-aware schema conventions.
+**Status:** Implemented and locally verified; browser E2E is pending M5. **Dependencies:** M0 authorization and tenant-aware schema conventions.
 
 **Objective:** Categories, brands, products, default and explicit variants, identifiers, product kinds (`RETAIL`, `REPAIR_PART`, `BOTH`), serial-tracking configuration and price history; authorized API and usable web workflows.
 
-**Acceptance:** Tenant composite keys prevent foreign tenant relationships; variant is canonical stock identity; product creation always produces at least one variant; `BOTH` uses one identity; identifiers are normalized and tenant-unique; price history uses integer minor units; create/update/archive are authorized and audited; DTO validation and UI loading/empty/error/denied states are covered.
+**Acceptance:** Tenant composite keys prevent foreign tenant relationships; variant is canonical stock identity; product creation always produces at least one variant; `BOTH` uses one identity; identifiers are normalized and tenant-unique; price history uses integer minor units; create/update/archive are authorized and audited; DTO validation is enforced; the workspace provides list/detail/create/edit/archive flows and explicit loading/empty/error/permission-denied presentation. Browser-level workflow verification remains an M5 acceptance item.
 
-**Verification:** Migration deploy on a fresh PostgreSQL database; API/contract and PostgreSQL tests for tenant uniqueness, variants, identifiers, product kinds, prices, archive constraints and audit; frontend build and Playwright create/list/detail/edit/archive workflows; RLS plus runtime-role grants check.
+**Verified locally:** `20261124110000_catalogue_foundation` and `20261124120000_catalogue_history_and_delete_guards` applied to `serviceflow_dev` and isolated `serviceflow_test`; Prisma migration status is clean. The full PostgreSQL integration suite passed **83/83**, including catalogue CRUD/default variant, cross-tenant denial, normalized SKU conflict, identifiers, price history immutability, audit, validation, database enforcement of one active default variant, and concurrent default-change/archive operations. `ci:check` passed formatting, TypeScript, **74/74** unit tests and API/web production builds. Fresh-database application of these M1 migrations is not yet verified; CI will execute that check after this milestone is committed and pushed. No Playwright/browser E2E exists yet.
+
+**Database changes:** Six models (`Category`, `Brand`, `Product`, `ProductVariant`, `ProductIdentifier`, `ProductPrice`) and three enums (`ProductKind`, `CatalogueStatus`, `ProductIdentifierType`); tenant-composite FKs, RLS, tenant-normalized uniqueness, deferred exactly-one-active-default constraint, archive-only runtime grants, and guarded immutable price history. Monetary values use non-negative integer minor units and currency codes. SKU is the canonical variant identity. Serial tracking is configuration only; unit records are deferred to M2.
 
 ### M2 — Inventory engine
 
@@ -75,4 +77,5 @@ POS, sales, customer orders, payments, invoices/refunds, repairs/parts consumpti
 - `20261124090000_business_authorization_foundation`: code-owned permission seed, `BranchScopeType`, tenant-composite branch/membership scopes, uniqueness and RLS.
 - `20261124100000_platform_activation_mfa_check`: least-disclosure security-definer boolean for activation eligibility, callable only by an active platform administrator in global identity context.
 
-Later milestone migrations will be recorded here only after implementation and verification.
+- `20261124110000_catalogue_foundation`: catalogue entities, tenant-consistent references and RLS, normalized tenant uniqueness, and deferred default-variant invariant.
+- `20261124120000_catalogue_history_and_delete_guards`: no physical catalogue deletion by runtime role and protected price-history intervals.
