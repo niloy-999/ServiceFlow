@@ -52,14 +52,18 @@ model User {
   emailVerificationTokens EmailVerificationToken[]
   passwordResetTokens     PasswordResetToken[]
 
-  platformAdminGrants        PlatformAdministrator[] @relation("PlatformAdminSubject")
-  platformAdminGrantsIssued  PlatformAdministrator[] @relation("PlatformAdminGrantor")
-  platformAdminGrantsRevoked PlatformAdministrator[] @relation("PlatformAdminRevoker")
-  mfa                        UserMfa?
-  mfaEnrollment              MfaEnrollment?
-  mfaRecoveryCodes           MfaRecoveryCode[]
-  mfaChallenges              MfaChallenge[]
-  auditEvents                AuditEvent[]
+  platformAdminGrants           PlatformAdministrator[] @relation("PlatformAdminSubject")
+  platformAdminGrantsIssued     PlatformAdministrator[] @relation("PlatformAdminGrantor")
+  platformAdminGrantsRevoked    PlatformAdministrator[] @relation("PlatformAdminRevoker")
+  mfa                           UserMfa?
+  mfaEnrollment                 MfaEnrollment?
+  mfaRecoveryCodes              MfaRecoveryCode[]
+  mfaChallenges                 MfaChallenge[]
+  auditEvents                   AuditEvent[]
+  inventoryOperations           InventoryOperation[]
+  inventoryAdjustmentsRequested InventoryAdjustment[]   @relation("InventoryAdjustmentRequester")
+  inventoryAdjustmentsDecided   InventoryAdjustment[]   @relation("InventoryAdjustmentDecider")
+  inventoryLedgerEntries        InventoryLedgerEntry[]
 
   @@map("users")
 }
@@ -75,13 +79,18 @@ model Business {
   updatedAt       DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
   version         BigInt         @default(1)
 
-  memberships TenantMembership[]
-  branches    Branch[]
-  roles       Role[]
-  auditEvents AuditEvent[]
-  categories  Category[]
-  brands      Brand[]
-  products    Product[]
+  memberships            TenantMembership[]
+  branches               Branch[]
+  roles                  Role[]
+  auditEvents            AuditEvent[]
+  categories             Category[]
+  brands                 Brand[]
+  products               Product[]
+  inventoryBalances      InventoryBalance[]
+  inventoryOperations    InventoryOperation[]
+  inventoryAdjustments   InventoryAdjustment[]
+  inventoryLedgerEntries InventoryLedgerEntry[]
+  inventorySerialUnits   InventorySerialUnit[]
 
   @@map("businesses")
 }
@@ -122,7 +131,11 @@ model Branch {
 
   business Business @relation(fields: [tenantId], references: [id], onDelete: Restrict)
 
-  membershipScopes MembershipBranchScope[]
+  membershipScopes       MembershipBranchScope[]
+  inventoryBalances      InventoryBalance[]
+  inventoryAdjustments   InventoryAdjustment[]
+  inventoryLedgerEntries InventoryLedgerEntry[]
+  inventorySerialUnits   InventorySerialUnit[]
 
   @@unique([tenantId, code])
   @@unique([tenantId, id])
@@ -259,12 +272,16 @@ model Product {
   updatedAt    DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
   version      BigInt          @default(1)
 
-  business    Business            @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  category    Category?           @relation(fields: [tenantId, categoryId], references: [tenantId, id], onDelete: Restrict)
-  brand       Brand?              @relation(fields: [tenantId, brandId], references: [tenantId, id], onDelete: Restrict)
-  variants    ProductVariant[]
-  identifiers ProductIdentifier[]
-  prices      ProductPrice[]
+  business               Business               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  category               Category?              @relation(fields: [tenantId, categoryId], references: [tenantId, id], onDelete: Restrict)
+  brand                  Brand?                 @relation(fields: [tenantId, brandId], references: [tenantId, id], onDelete: Restrict)
+  variants               ProductVariant[]
+  identifiers            ProductIdentifier[]
+  prices                 ProductPrice[]
+  inventoryBalances      InventoryBalance[]
+  inventoryAdjustments   InventoryAdjustment[]
+  inventoryLedgerEntries InventoryLedgerEntry[]
+  inventorySerialUnits   InventorySerialUnit[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, productCode])
@@ -288,9 +305,13 @@ model ProductVariant {
   updatedAt   DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
   version     BigInt          @default(1)
 
-  product     Product             @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict)
-  identifiers ProductIdentifier[]
-  prices      ProductPrice[]
+  product                Product                @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict)
+  identifiers            ProductIdentifier[]
+  prices                 ProductPrice[]
+  inventoryBalances      InventoryBalance[]
+  inventoryAdjustments   InventoryAdjustment[]
+  inventoryLedgerEntries InventoryLedgerEntry[]
+  inventorySerialUnits   InventorySerialUnit[]
 
   @@unique([tenantId, productId, id])
   @@unique([tenantId, productId, variantCode])
@@ -491,4 +512,161 @@ model AuditEvent {
   @@index([tenantId, occurredAt])
   @@index([targetType, targetId])
   @@map("audit_events")
+}
+
+// ============================================================
+// M2 — Inventory foundation
+// ============================================================
+
+enum InventoryOperationType {
+  ADJUSTMENT_SUBMIT
+  ADJUSTMENT_APPROVE
+  ADJUSTMENT_REJECT
+}
+
+enum InventoryAdjustmentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum InventorySerialUnitStatus {
+  IN_STOCK
+  REMOVED
+}
+
+model InventoryBalance {
+  id                String         @id @default(uuid()) @db.Uuid
+  tenantId          String         @map("tenant_id") @db.Uuid
+  branchId          String         @map("branch_id") @db.Uuid
+  productId         String         @map("product_id") @db.Uuid
+  variantId         String         @map("variant_id") @db.Uuid
+  physicalQuantity  Int            @default(0) @map("physical_quantity")
+  reservedQuantity  Int            @default(0) @map("reserved_quantity")
+  inTransitQuantity Int            @default(0) @map("in_transit_quantity")
+  createdAt         DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version           BigInt         @default(1)
+  business          Business       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch            Branch         @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: Restrict)
+  product           Product        @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict)
+  variant           ProductVariant @relation(fields: [tenantId, productId, variantId], references: [tenantId, productId, id], onDelete: Restrict)
+
+  @@unique([tenantId, branchId, variantId])
+  @@unique([tenantId, id])
+  @@index([tenantId, productId, branchId])
+  @@map("inventory_balances")
+}
+
+model InventoryOperation {
+  id                   String                 @id @default(uuid()) @db.Uuid
+  tenantId             String                 @map("tenant_id") @db.Uuid
+  operationType        InventoryOperationType @map("operation_type")
+  idempotencyKey       String                 @map("idempotency_key") @db.VarChar(160)
+  requestHash          String                 @map("request_hash") @db.Char(64)
+  actorUserId          String                 @map("actor_user_id") @db.Uuid
+  targetId             String?                @map("target_id") @db.Uuid
+  result               Json?
+  completedAt          DateTime?              @map("completed_at") @db.Timestamptz(3)
+  createdAt            DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)
+  business             Business               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  actor                User                   @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
+  submittedAdjustments InventoryAdjustment[]  @relation("AdjustmentSubmissionOperation")
+  decidedAdjustments   InventoryAdjustment[]  @relation("AdjustmentDecisionOperation")
+  ledgerEntries        InventoryLedgerEntry[]
+
+  @@unique([tenantId, idempotencyKey])
+  @@unique([tenantId, id])
+  @@index([tenantId, targetId, operationType])
+  @@map("inventory_operations")
+}
+
+model InventoryAdjustment {
+  id                    String                    @id @default(uuid()) @db.Uuid
+  tenantId              String                    @map("tenant_id") @db.Uuid
+  branchId              String                    @map("branch_id") @db.Uuid
+  productId             String                    @map("product_id") @db.Uuid
+  variantId             String                    @map("variant_id") @db.Uuid
+  requestedBy           String                    @map("requested_by") @db.Uuid
+  submissionOperationId String                    @unique @map("submission_operation_id") @db.Uuid
+  quantityDelta         Int                       @map("quantity_delta")
+  reason                String                    @db.VarChar(500)
+  serialChanges         Json                      @default("[]") @map("serial_changes") @db.JsonB
+  status                InventoryAdjustmentStatus @default(PENDING)
+  decidedBy             String?                   @map("decided_by") @db.Uuid
+  decisionReason        String?                   @map("decision_reason") @db.VarChar(500)
+  decidedAt             DateTime?                 @map("decided_at") @db.Timestamptz(3)
+  createdAt             DateTime                  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime                  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  decisionOperationId   String?                   @unique @map("decision_operation_id") @db.Uuid
+  business              Business                  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch                Branch                    @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: Restrict)
+  product               Product                   @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict)
+  variant               ProductVariant            @relation(fields: [tenantId, productId, variantId], references: [tenantId, productId, id], onDelete: Restrict)
+  requester             User                      @relation("InventoryAdjustmentRequester", fields: [requestedBy], references: [id], onDelete: Restrict)
+  decider               User?                     @relation("InventoryAdjustmentDecider", fields: [decidedBy], references: [id], onDelete: Restrict)
+  submissionOperation   InventoryOperation        @relation("AdjustmentSubmissionOperation", fields: [tenantId, submissionOperationId], references: [tenantId, id], onDelete: Restrict)
+  decisionOperation     InventoryOperation?       @relation("AdjustmentDecisionOperation", fields: [tenantId, decisionOperationId], references: [tenantId, id], onDelete: Restrict)
+  ledgerEntry           InventoryLedgerEntry?
+  serialUnitsAdded      InventorySerialUnit[]     @relation("SerialAddedByAdjustment")
+  serialUnitsRemoved    InventorySerialUnit[]     @relation("SerialRemovedByAdjustment")
+
+  @@unique([tenantId, id])
+  @@index([tenantId, branchId, status, createdAt])
+  @@index([tenantId, variantId, createdAt])
+  @@map("inventory_adjustments")
+}
+
+model InventoryLedgerEntry {
+  id            String              @id @default(uuid()) @db.Uuid
+  tenantId      String              @map("tenant_id") @db.Uuid
+  branchId      String              @map("branch_id") @db.Uuid
+  productId     String              @map("product_id") @db.Uuid
+  variantId     String              @map("variant_id") @db.Uuid
+  adjustmentId  String              @unique @map("adjustment_id") @db.Uuid
+  operationId   String              @unique @map("operation_id") @db.Uuid
+  quantityDelta Int                 @map("quantity_delta")
+  balanceAfter  Int                 @map("balance_after")
+  actorUserId   String              @map("actor_user_id") @db.Uuid
+  createdAt     DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  business      Business            @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch        Branch              @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: Restrict)
+  product       Product             @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict)
+  variant       ProductVariant      @relation(fields: [tenantId, productId, variantId], references: [tenantId, productId, id], onDelete: Restrict)
+  adjustment    InventoryAdjustment @relation(fields: [tenantId, adjustmentId], references: [tenantId, id], onDelete: Restrict)
+  operation     InventoryOperation  @relation(fields: [tenantId, operationId], references: [tenantId, id], onDelete: Restrict)
+  actor         User                @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, adjustmentId])
+  @@unique([tenantId, operationId])
+  @@index([tenantId, variantId, branchId, createdAt])
+  @@index([tenantId, adjustmentId])
+  @@map("inventory_ledger_entries")
+}
+
+model InventorySerialUnit {
+  id                    String                    @id @default(uuid()) @db.Uuid
+  tenantId              String                    @map("tenant_id") @db.Uuid
+  branchId              String                    @map("branch_id") @db.Uuid
+  productId             String                    @map("product_id") @db.Uuid
+  variantId             String                    @map("variant_id") @db.Uuid
+  serialNormalized      String                    @map("serial_normalized") @db.VarChar(160)
+  status                InventorySerialUnitStatus @default(IN_STOCK)
+  addedByAdjustmentId   String                    @map("added_by_adjustment_id") @db.Uuid
+  removedByAdjustmentId String?                   @map("removed_by_adjustment_id") @db.Uuid
+  createdAt             DateTime                  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime                  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  business              Business                  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch                Branch                    @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: Restrict)
+  product               Product                   @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict)
+  variant               ProductVariant            @relation(fields: [tenantId, productId, variantId], references: [tenantId, productId, id], onDelete: Restrict)
+  addedByAdjustment     InventoryAdjustment       @relation("SerialAddedByAdjustment", fields: [tenantId, addedByAdjustmentId], references: [tenantId, id], onDelete: Restrict)
+  removedByAdjustment   InventoryAdjustment?      @relation("SerialRemovedByAdjustment", fields: [tenantId, removedByAdjustmentId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, variantId, serialNormalized])
+  @@unique([tenantId, id])
+  @@index([tenantId, branchId, variantId, status])
+  @@index([tenantId, addedByAdjustmentId])
+  @@map("inventory_serial_units")
 }

@@ -338,6 +338,34 @@ test("Tenant access requires an active user, membership, and business", async ()
   }
 });
 
+test("Authorization helper rejects identities that differ from the active transaction context", async () => {
+  await tenantContext.withAuthorizedTenantContext(userA, tenantA, async (tx) => {
+    await assert.rejects(
+      authorization.assertPermissionInTransaction(tx, {
+        userId: userB,
+        tenantId: tenantA,
+        branchId: branchA,
+        permission: "catalogue.read",
+        operation: "VIEW",
+      }),
+      (error) => error?.getStatus?.() === 403,
+      "A different user must be rejected",
+    );
+
+    await assert.rejects(
+      authorization.assertPermissionInTransaction(tx, {
+        userId: userA,
+        tenantId: tenantB,
+        branchId: branchB,
+        permission: "catalogue.read",
+        operation: "VIEW",
+      }),
+      (error) => error?.getStatus?.() === 403,
+      "A different tenant must be rejected",
+    );
+  });
+});
+
 test("Permissions and branch scopes are independently enforced in the tenant transaction", async () => {
   await assert.rejects(
     migrator.query(

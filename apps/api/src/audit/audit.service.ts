@@ -11,6 +11,7 @@ export interface AuditEventInput {
   targetType: string;
   targetId: string;
   outcome: "SUCCESS" | "FAILURE";
+  metadata?: Record<string, unknown>;
 }
 
 @Injectable()
@@ -49,7 +50,8 @@ export class AuditService {
         action,
         target_type,
         target_id,
-        outcome
+        outcome,
+        metadata
       )
       VALUES (
         ${id}::uuid,
@@ -59,7 +61,8 @@ export class AuditService {
         ${event.action},
         ${event.targetType},
         ${event.targetId},
-        ${event.outcome}
+        ${event.outcome},
+        ${JSON.stringify(event.metadata ?? {})}::jsonb
       )
     `;
 
