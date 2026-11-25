@@ -21,7 +21,8 @@
     "test:mfa-challenge": "node --test test/mfa-challenge.integration.mjs",
     "test:global-identity-context": "node --test test/global-identity-context.integration.mjs",
     "mfa:rotate-keys": "node scripts/rotate-mfa-encryption-keys.mjs",
-    "test:mfa-key-rotation": "node --test test/rotate-mfa-encryption-keys.test.mjs"
+    "test:mfa-key-rotation": "node --test test/rotate-mfa-encryption-keys.test.mjs",
+    "test:supplier-integration": "node --test test/m3/supplier.integration.mjs"
   },
   "dependencies": {
     "@nestjs/common": "12.5.1",

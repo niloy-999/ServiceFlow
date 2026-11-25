@@ -85,6 +85,7 @@ model Business {
   auditEvents            AuditEvent[]
   categories             Category[]
   brands                 Brand[]
+  suppliers              Supplier[]
   products               Product[]
   inventoryBalances      InventoryBalance[]
   inventoryOperations    InventoryOperation[]
@@ -255,6 +256,29 @@ model Brand {
   @@unique([tenantId, nameNormalized])
   @@index([tenantId, status, name])
   @@map("brands")
+}
+
+model Supplier {
+  id             String          @id @default(uuid()) @db.Uuid
+  tenantId       String          @map("tenant_id") @db.Uuid
+  name           String          @db.VarChar(160)
+  nameNormalized String          @map("name_normalized") @db.VarChar(160)
+  contactName    String?         @map("contact_name") @db.VarChar(160)
+  email          String?         @db.VarChar(320)
+  phone          String?         @db.VarChar(40)
+  address        String?         @db.VarChar(500)
+  notes          String?         @db.VarChar(2000)
+  status         CatalogueStatus @default(ACTIVE)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version        BigInt          @default(1)
+
+  business Business @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, nameNormalized])
+  @@index([tenantId, status, name])
+  @@map("suppliers")
 }
 
 model Product {

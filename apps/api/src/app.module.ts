@@ -6,6 +6,7 @@ import { IdentityModule } from "./identity/identity.module.js";
 import { AuthorizationModule } from "./authorization/authorization.module.js";
 import { CatalogueModule } from "./catalogue/catalogue.module.js";
 import { InventoryModule } from "./inventory/inventory.module.js";
+import { SupplierModule } from "./suppliers/supplier.module.js";
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { InventoryModule } from "./inventory/inventory.module.js";
     BusinessModule,
     CatalogueModule,
     InventoryModule,
+    SupplierModule,
   ],
 })
 export class AppModule {}
