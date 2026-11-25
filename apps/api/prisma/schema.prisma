@@ -36,6 +36,22 @@ enum ProductIdentifierType {
   ALTERNATE
 }
 
+enum PurchaseOrderStatus {
+  DRAFT
+  PENDING_APPROVAL
+  WITHDRAWN
+  APPROVED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+enum PurchaseOrderCancellationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 model User {
   id              String    @id @default(uuid()) @db.Uuid
   emailNormalized String    @unique @map("email_normalized") @db.VarChar(320)
@@ -92,6 +108,8 @@ model Business {
   inventoryAdjustments   InventoryAdjustment[]
   inventoryLedgerEntries InventoryLedgerEntry[]
   inventorySerialUnits   InventorySerialUnit[]
+  purchaseOrders         PurchaseOrder[]
+  purchaseOrderCounter   PurchaseOrderCounter?
 
   @@map("businesses")
 }
@@ -111,8 +129,15 @@ model TenantMembership {
 
   user User @relation(fields: [userId], references: [id], onDelete: Restrict)
 
-  roleAssignments MembershipRole[]
-  branchScopes    MembershipBranchScope[]
+  roleAssignments             MembershipRole[]
+  branchScopes                MembershipBranchScope[]
+  purchaseOrdersCreated       PurchaseOrder[]                    @relation("PurchaseOrderCreator")
+  purchaseOrdersSubmitted     PurchaseOrder[]                    @relation("PurchaseOrderSubmitter")
+  purchaseOrdersApproved      PurchaseOrder[]                    @relation("PurchaseOrderApprover")
+  purchaseOrdersCancelled     PurchaseOrder[]                    @relation("PurchaseOrderCanceller")
+  purchaseOrdersWithdrawn     PurchaseOrder[]                    @relation("PurchaseOrderWithdrawer")
+  cancellationRequestsCreated PurchaseOrderCancellationRequest[] @relation("PurchaseOrderCancellationRequester")
+  cancellationRequestsDecided PurchaseOrderCancellationRequest[] @relation("PurchaseOrderCancellationReviewer")
 
   @@unique([tenantId, userId])
   @@unique([tenantId, id])
@@ -137,6 +162,7 @@ model Branch {
   inventoryAdjustments   InventoryAdjustment[]
   inventoryLedgerEntries InventoryLedgerEntry[]
   inventorySerialUnits   InventorySerialUnit[]
+  purchaseOrders         PurchaseOrder[]
 
   @@unique([tenantId, code])
   @@unique([tenantId, id])
@@ -273,7 +299,8 @@ model Supplier {
   updatedAt      DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
   version        BigInt          @default(1)
 
-  business Business @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  business       Business        @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  purchaseOrders PurchaseOrder[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, nameNormalized])
@@ -306,6 +333,7 @@ model Product {
   inventoryAdjustments   InventoryAdjustment[]
   inventoryLedgerEntries InventoryLedgerEntry[]
   inventorySerialUnits   InventorySerialUnit[]
+  purchaseOrderLines     PurchaseOrderLine[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, productCode])
@@ -336,6 +364,7 @@ model ProductVariant {
   inventoryAdjustments   InventoryAdjustment[]
   inventoryLedgerEntries InventoryLedgerEntry[]
   inventorySerialUnits   InventorySerialUnit[]
+  purchaseOrderLines     PurchaseOrderLine[]
 
   @@unique([tenantId, productId, id])
   @@unique([tenantId, productId, variantCode])
@@ -693,4 +722,107 @@ model InventorySerialUnit {
   @@index([tenantId, branchId, variantId, status])
   @@index([tenantId, addedByAdjustmentId])
   @@map("inventory_serial_units")
+}
+
+model PurchaseOrder {
+  id                 String              @id @default(uuid()) @db.Uuid
+  tenantId           String              @map("tenant_id") @db.Uuid
+  branchId           String              @map("branch_id") @db.Uuid
+  supplierId         String              @map("supplier_id") @db.Uuid
+  orderNumber        String              @map("order_number") @db.VarChar(64)
+  currency           String              @db.Char(3)
+  status             PurchaseOrderStatus @default(DRAFT)
+  notes              String?             @db.VarChar(2000)
+  createdByUserId    String              @map("created_by_user_id") @db.Uuid
+  submittedByUserId  String?             @map("submitted_by_user_id") @db.Uuid
+  submittedAt        DateTime?           @map("submitted_at") @db.Timestamptz(3)
+  approvedByUserId   String?             @map("approved_by_user_id") @db.Uuid
+  approvedAt         DateTime?           @map("approved_at") @db.Timestamptz(3)
+  cancelledByUserId  String?             @map("cancelled_by_user_id") @db.Uuid
+  cancelledAt        DateTime?           @map("cancelled_at") @db.Timestamptz(3)
+  cancellationReason String?             @map("cancellation_reason") @db.VarChar(1000)
+  withdrawnByUserId  String?             @map("withdrawn_by_user_id") @db.Uuid
+  withdrawnAt        DateTime?           @map("withdrawn_at") @db.Timestamptz(3)
+  withdrawalReason   String?             @map("withdrawal_reason") @db.VarChar(1000)
+  createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version            BigInt              @default(1)
+
+  business             Business                           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  branch               Branch                             @relation(fields: [tenantId, branchId], references: [tenantId, id], onDelete: Restrict)
+  supplier             Supplier                           @relation(fields: [tenantId, supplierId], references: [tenantId, id], onDelete: Restrict)
+  creator              TenantMembership                   @relation("PurchaseOrderCreator", fields: [tenantId, createdByUserId], references: [tenantId, userId], onDelete: Restrict)
+  submitter            TenantMembership?                  @relation("PurchaseOrderSubmitter", fields: [tenantId, submittedByUserId], references: [tenantId, userId], onDelete: Restrict)
+  approver             TenantMembership?                  @relation("PurchaseOrderApprover", fields: [tenantId, approvedByUserId], references: [tenantId, userId], onDelete: Restrict)
+  canceller            TenantMembership?                  @relation("PurchaseOrderCanceller", fields: [tenantId, cancelledByUserId], references: [tenantId, userId], onDelete: Restrict)
+  withdrawer           TenantMembership?                  @relation("PurchaseOrderWithdrawer", fields: [tenantId, withdrawnByUserId], references: [tenantId, userId], onDelete: Restrict)
+  lines                PurchaseOrderLine[]
+  cancellationRequests PurchaseOrderCancellationRequest[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, orderNumber])
+  @@index([tenantId, branchId, status, createdAt])
+  @@index([tenantId, supplierId, status])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderCancellationRequest {
+  id                String                          @id @default(uuid()) @db.Uuid
+  tenantId          String                          @map("tenant_id") @db.Uuid
+  purchaseOrderId   String                          @map("purchase_order_id") @db.Uuid
+  requestedByUserId String                          @map("requested_by_user_id") @db.Uuid
+  requestedAt       DateTime                        @default(now()) @map("requested_at") @db.Timestamptz(3)
+  requestReason     String                          @map("request_reason") @db.VarChar(1000)
+  status            PurchaseOrderCancellationStatus @default(PENDING)
+  decidedByUserId   String?                         @map("decided_by_user_id") @db.Uuid
+  decidedAt         DateTime?                       @map("decided_at") @db.Timestamptz(3)
+  decisionReason    String?                         @map("decision_reason") @db.VarChar(1000)
+  createdAt         DateTime                        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime                        @updatedAt @map("updated_at") @db.Timestamptz(3)
+  version           BigInt                          @default(1)
+
+  purchaseOrder PurchaseOrder     @relation(fields: [tenantId, purchaseOrderId], references: [tenantId, id], onDelete: Restrict)
+  requester     TenantMembership  @relation("PurchaseOrderCancellationRequester", fields: [tenantId, requestedByUserId], references: [tenantId, userId], onDelete: Restrict)
+  reviewer      TenantMembership? @relation("PurchaseOrderCancellationReviewer", fields: [tenantId, decidedByUserId], references: [tenantId, userId], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, purchaseOrderId, requestedAt])
+  @@index([tenantId, status, requestedAt])
+  @@map("purchase_order_cancellation_requests")
+}
+
+model PurchaseOrderCounter {
+  tenantId   String   @id @map("tenant_id") @db.Uuid
+  nextNumber BigInt   @default(1) @map("next_number")
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  business Business @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  @@map("purchase_order_counters")
+}
+
+model PurchaseOrderLine {
+  id                  String   @id @default(uuid()) @db.Uuid
+  tenantId            String   @map("tenant_id") @db.Uuid
+  purchaseOrderId     String   @map("purchase_order_id") @db.Uuid
+  productId           String   @map("product_id") @db.Uuid
+  variantId           String   @map("variant_id") @db.Uuid
+  productCodeSnapshot String   @map("product_code_snapshot") @db.VarChar(64)
+  productNameSnapshot String   @map("product_name_snapshot") @db.VarChar(180)
+  variantCodeSnapshot String   @map("variant_code_snapshot") @db.VarChar(64)
+  skuSnapshot         String   @map("sku_snapshot") @db.VarChar(100)
+  variantNameSnapshot String   @map("variant_name_snapshot") @db.VarChar(180)
+  orderedQuantity     Int      @map("ordered_quantity")
+  unitCostMinor       BigInt   @map("unit_cost_minor")
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  purchaseOrder PurchaseOrder  @relation(fields: [tenantId, purchaseOrderId], references: [tenantId, id], onDelete: Restrict)
+  product       Product        @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Restrict)
+  variant       ProductVariant @relation(fields: [tenantId, productId, variantId], references: [tenantId, productId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, purchaseOrderId])
+  @@index([tenantId, variantId])
+  @@map("purchase_order_lines")
 }

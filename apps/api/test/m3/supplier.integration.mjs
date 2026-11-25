@@ -205,7 +205,7 @@ before(async () => {
   app.enableCors({
     origin: (requestOrigin, callback) => callback(null, requestOrigin === origin),
     credentials: true,
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "X-CSRF-Token"],
   });
   app.useGlobalPipes(

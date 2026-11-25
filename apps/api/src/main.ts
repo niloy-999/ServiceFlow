@@ -53,7 +53,7 @@ async function bootstrap() {
     ) => callback(null, requestOrigin === frontendOrigin),
     credentials: true,
     exposedHeaders: ["X-Request-Id"],
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "X-CSRF-Token"],
   });
 
